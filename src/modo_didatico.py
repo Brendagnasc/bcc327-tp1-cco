@@ -15,7 +15,10 @@ Uso:
 Teclas e mouse:
     1        modo árvore: segmentos da árvore CCO rasterizados
     2        modo segmento: clique em dois pixels para traçar um segmento
-    B        alterna o algoritmo: Bresenham / DDA
+    3        modo polígono: região de interesse preenchida com Scanline Fill
+    N        (modo 3) novo polígono: clique nos vértices e feche com Enter
+    Espaço   (modo 3) anima o preenchimento linha a linha
+    B        alterna o algoritmo de segmentos: Bresenham / DDA
     L        mostra / esconde a reta ideal (contínua) por cima dos pixels
     S        salva a tela em report/figures/
     ESC      sai
@@ -29,7 +32,8 @@ import pygame
 
 from cores import mapear_cores
 from leitor_vtk import ler_vtk
-from rasterizacao import bresenham, dda, imprimir_rastro
+from rasterizacao import (bresenham, dda, imprimir_rastro, imprimir_scanline,
+                          scanline_linhas)
 
 COLUNAS, LINHAS = 80, 60          # tamanho do framebuffer, em pixels
 CELULA = 12                       # cada pixel vira um quadrado de 12x12 na tela
@@ -37,6 +41,13 @@ PAINEL = 60                       # faixa inferior para texto
 LARGURA, ALTURA = COLUNAS * CELULA, LINHAS * CELULA + PAINEL
 BRANCO = (255, 255, 255)
 ALGORITMOS = {"Bresenham": bresenham, "DDA": dda}
+COR_REGIAO = (255, 214, 150)      # preenchimento do polígono
+COR_BORDA = (200, 90, 0)          # contorno do polígono
+COR_ARVORE_FUNDO = (150, 150, 150)
+
+# Polígono côncavo de exemplo: uma região de interesse sobre a árvore
+POLIGONO_PADRAO = [(16, 10), (42, 6), (64, 16), (52, 30), (66, 46),
+                   (40, 40), (24, 52), (12, 30)]
 
 
 class Framebuffer:
@@ -94,6 +105,9 @@ class App:
         self.reta_ideal = True
         self.segmento = (20, 10, 30, 18)            # exemplo do relatório
         self.clique = None
+        self.poligono = list(POLIGONO_PADRAO)
+        self.editando = False                       # True enquanto recebe vértices
+        self.anim = None                            # linha atual da animação
         self.info = ""
 
     # ------------------------------------------------------------ rasterizar
@@ -109,6 +123,8 @@ class App:
                 total += len(px)
             self.info = (f"Árvore {self.arvore.nome} | {self.algoritmo} | "
                          f"{len(self.segs_arvore)} segmentos | {total} pixels")
+        elif self.modo == 3:
+            self.rasterizar_poligono(f)
         else:
             x0, y0, x1, y1 = self.segmento
             px = f(x0, y0, x1, y1)
@@ -117,6 +133,47 @@ class App:
             self.fb.acender([(x1, y1)], (200, 0, 0))
             self.info = (f"Segmento ({x0},{y0}) a ({x1},{y1}) | {self.algoritmo} | "
                          f"{len(px)} pixels | clique em dois pixels")
+
+    def rasterizar_poligono(self, f):
+        """Região preenchida, árvore em cinza por cima e contorno por último."""
+        def desenhar_arvore_cinza():
+            for x0, y0, x1, y1 in self.segs_arvore:
+                self.fb.acender(f(x0, y0, x1, y1), COR_ARVORE_FUNDO)
+
+        if self.editando or len(self.poligono) < 3:
+            desenhar_arvore_cinza()
+            for a, b in zip(self.poligono, self.poligono[1:]):
+                self.fb.acender(f(*a, *b), COR_BORDA)
+            self.fb.acender(self.poligono, (0, 160, 0))
+            self.info = (f"Novo polígono: {len(self.poligono)} vértices | "
+                         f"clique para adicionar, Enter fecha")
+            return
+
+        linhas = scanline_linhas(self.poligono)
+        visiveis = linhas if self.anim is None else linhas[:self.anim + 1]
+        total = 0
+        for y, _, spans in visiveis:
+            for xi, xf in spans:
+                self.fb.acender([(x, y) for x in range(xi, xf + 1)], COR_REGIAO)
+                total += max(0, xf - xi + 1)
+
+        desenhar_arvore_cinza()
+        n = len(self.poligono)
+        for i in range(n):
+            self.fb.acender(f(*self.poligono[i], *self.poligono[(i + 1) % n]), COR_BORDA)
+        self.fb.acender(self.poligono, (0, 160, 0))
+
+        estado = "" if self.anim is None else f" | linha y = {visiveis[-1][0]}"
+        self.info = (f"Scanline Fill | {n} vértices | {len(linhas)} linhas | "
+                     f"{total} pixels internos{estado}")
+
+    def avancar_animacao(self):
+        if self.anim is None:
+            return
+        self.anim += 1
+        if self.anim >= len(scanline_linhas(self.poligono)):
+            self.anim = None
+        self.rasterizar()
 
     # ------------------------------------------------------------ desenhar
     def desenhar(self, tela, fonte):
@@ -131,11 +188,18 @@ class App:
             pygame.draw.line(tela, cinza, (0, l * CELULA), (COLUNAS * CELULA, l * CELULA))
 
         # reta ideal por cima, só como referência visual
-        if self.reta_ideal:
+        if self.reta_ideal and self.modo in (1, 2):
             segs = self.segs_arvore if self.modo == 1 else [self.segmento]
             for x0, y0, x1, y1 in segs:
                 pygame.draw.aaline(tela, (0, 0, 0), centro_na_tela(x0, y0),
                                    centro_na_tela(x1, y1))
+
+        # linha de varredura atual durante a animação
+        if self.modo == 3 and self.anim is not None:
+            linhas = scanline_linhas(self.poligono)
+            y = linhas[min(self.anim, len(linhas) - 1)][0]
+            yt = (LINHAS - 1 - y + 0.5) * CELULA
+            pygame.draw.line(tela, (220, 0, 0), (0, yt), (COLUNAS * CELULA, yt), 2)
 
         if self.clique is not None:
             pygame.draw.rect(tela, (0, 160, 0), (*[v - CELULA / 2 for v in
@@ -143,22 +207,32 @@ class App:
 
         y_txt = LINHAS * CELULA + 8
         tela.blit(fonte.render(self.info, True, (20, 20, 20)), (10, y_txt))
-        ajuda = "1 árvore  2 segmento  B algoritmo  L reta ideal  S salvar  ESC sair"
+        ajuda = ("1 árvore  2 segmento  3 polígono  N novo  Enter fecha  Espaço anima  "
+                 "B algoritmo  L reta  S salvar")
         tela.blit(fonte.render(ajuda, True, (90, 90, 90)), (10, y_txt + 24))
 
     def salvar(self, tela):
         pasta = Path("report/figures")
         pasta.mkdir(parents=True, exist_ok=True)
-        nome = "raster_arvore" if self.modo == 1 else "raster_segmento"
-        caminho = pasta / f"{nome}_{self.algoritmo.lower()}.png"
+        if self.modo == 3:
+            caminho = pasta / "scanline_poligono.png"
+        else:
+            nome = "raster_arvore" if self.modo == 1 else "raster_segmento"
+            caminho = pasta / f"{nome}_{self.algoritmo.lower()}.png"
         pygame.image.save(tela, str(caminho))
         print("salvo:", caminho)
 
     # ------------------------------------------------------------ eventos
     def tratar_clique(self, pos):
-        if self.modo != 2 or pos[1] >= LINHAS * CELULA:
+        if pos[1] >= LINHAS * CELULA:
             return
         p = pixel_do_mouse(pos)
+        if self.modo == 3 and self.editando:
+            self.poligono.append(p)
+            self.rasterizar()
+            return
+        if self.modo != 2:
+            return
         if self.clique is None:
             self.clique = p
         else:
@@ -177,10 +251,11 @@ def main():
     pygame.font.init()
     tela = pygame.display.set_mode((LARGURA, ALTURA))
     pygame.display.set_caption("TP1 CCO - modo didático")
-    fonte = pygame.font.Font(None, 24)
+    fonte = pygame.font.Font(None, 22)
     app.rasterizar()
 
     relogio = pygame.time.Clock()
+    quadro = 0
     rodando = True
     while rodando:
         for evento in pygame.event.get():
@@ -191,9 +266,21 @@ def main():
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     rodando = False
-                elif evento.key in (pygame.K_1, pygame.K_2):
+                elif evento.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                     app.modo = evento.key - pygame.K_0
                     app.clique = None
+                    app.anim = None
+                    app.rasterizar()
+                elif evento.key == pygame.K_n and app.modo == 3:
+                    app.poligono, app.editando, app.anim = [], True, None
+                    app.rasterizar()
+                elif evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and app.editando:
+                    if len(app.poligono) >= 3:
+                        app.editando = False
+                        app.rasterizar()
+                        imprimir_scanline(app.poligono)
+                elif evento.key == pygame.K_SPACE and app.modo == 3 and not app.editando:
+                    app.anim = 0
                     app.rasterizar()
                 elif evento.key == pygame.K_b:
                     app.algoritmo = "DDA" if app.algoritmo == "Bresenham" else "Bresenham"
@@ -202,6 +289,10 @@ def main():
                     app.reta_ideal = not app.reta_ideal
                 elif evento.key == pygame.K_s:
                     app.salvar(tela)
+
+        quadro += 1
+        if quadro % 3 == 0:                         # animação a ~10 linhas por segundo
+            app.avancar_animacao()
 
         app.desenhar(tela, fonte)
         pygame.display.flip()
