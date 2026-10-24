@@ -16,6 +16,9 @@ Teclas e mouse:
     1        modo árvore: segmentos da árvore CCO rasterizados
     2        modo segmento: clique em dois pixels para traçar um segmento
     3        modo polígono: região de interesse preenchida com Scanline Fill
+    4        modo antialiasing: mesma cena sem (esquerda) e com SSAA (direita)
+    K        (modo 4) fator de supersampling: 2 / 4 / 8
+    T        (modo 4) cena: leque de linhas / árvore CCO
     N        (modo 3) novo polígono: clique nos vértices e feche com Enter
     Espaço   (modo 3) anima o preenchimento linha a linha
     B        alterna o algoritmo de segmentos: Bresenham / DDA
@@ -30,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pygame
 
+from antialiasing import cena_estrela, renderizar
 from cores import mapear_cores
 from leitor_vtk import ler_vtk
 from rasterizacao import (bresenham, dda, imprimir_rastro, imprimir_scanline,
@@ -82,14 +86,18 @@ def pixel_do_mouse(pos):
     return int(mx // CELULA), LINHAS - 1 - int(my // CELULA)
 
 
-def segmentos_da_arvore(arvore, margem=3):
-    """Projeta a árvore 2D na grade: escala uniforme + arredondamento."""
+def segmentos_da_arvore(arvore, colunas=COLUNAS, linhas=LINHAS, margem=3, arredondar=True):
+    """Projeta a árvore 2D numa grade colunas x linhas: escala uniforme,
+    centralização e (opcionalmente) arredondamento para pixels inteiros."""
     xy = arvore.pontos[:, :2]
     minimo = xy.min(axis=0)
     tamanho = (xy.max(axis=0) - minimo).max()
-    util = min(COLUNAS, LINHAS) - 1 - 2 * margem
-    grade = np.rint((xy - minimo) / tamanho * util).astype(int) + margem
-    grade[:, 0] += (COLUNAS - LINHAS) // 2          # centraliza na horizontal
+    util = min(colunas, linhas) - 1 - 2 * margem
+    grade = (xy - minimo) / tamanho * util + margem
+    grade[:, 0] += (colunas - 1 - 2 * margem - util) / 2     # centraliza em x
+    grade[:, 1] += (linhas - 1 - 2 * margem - util) / 2      # centraliza em y
+    if arredondar:
+        grade = np.rint(grade).astype(int)
     return [(*grade[i], *grade[j]) for i, j in arvore.segmentos]
 
 
@@ -108,6 +116,8 @@ class App:
         self.poligono = list(POLIGONO_PADRAO)
         self.editando = False                       # True enquanto recebe vértices
         self.anim = None                            # linha atual da animação
+        self.fator = 4                              # supersampling do modo 4
+        self.cena_aa = "leque"
         self.info = ""
 
     # ------------------------------------------------------------ rasterizar
@@ -125,6 +135,8 @@ class App:
                          f"{len(self.segs_arvore)} segmentos | {total} pixels")
         elif self.modo == 3:
             self.rasterizar_poligono(f)
+        elif self.modo == 4:
+            self.rasterizar_antialiasing()
         else:
             x0, y0, x1, y1 = self.segmento
             px = f(x0, y0, x1, y1)
@@ -167,6 +179,22 @@ class App:
         self.info = (f"Scanline Fill | {n} vértices | {len(linhas)} linhas | "
                      f"{total} pixels internos{estado}")
 
+    def rasterizar_antialiasing(self):
+        """Metade esquerda: cena com k = 1 (serrilhada).
+        Metade direita: mesma cena com supersampling k x k."""
+        meia = COLUNAS // 2
+        if self.cena_aa == "leque":
+            cena = cena_estrela(meia, LINHAS)
+        else:
+            segs = segmentos_da_arvore(self.arvore, meia, LINHAS, margem=2, arredondar=False)
+            ordem = np.argsort(self.arvore.raios)
+            cena = [("linha", segs[i], tuple(int(c) for c in self.cores_arvore[i]))
+                    for i in ordem]
+        self.fb.pixels[:, :meia] = renderizar(cena, meia, LINHAS, 1)
+        self.fb.pixels[:, meia:] = renderizar(cena, meia, LINHAS, self.fator)
+        self.info = (f"Antialiasing | cena {self.cena_aa} | esquerda: sem AA | "
+                     f"direita: SSAA {self.fator}x ({self.fator ** 2} amostras por pixel)")
+
     def avancar_animacao(self):
         if self.anim is None:
             return
@@ -201,14 +229,21 @@ class App:
             yt = (LINHAS - 1 - y + 0.5) * CELULA
             pygame.draw.line(tela, (220, 0, 0), (0, yt), (COLUNAS * CELULA, yt), 2)
 
+        if self.modo == 4:
+            meio = COLUNAS // 2 * CELULA
+            pygame.draw.line(tela, (220, 0, 0), (meio, 0), (meio, LINHAS * CELULA), 3)
+            for texto, x in (("sem antialiasing", 10), (f"SSAA {self.fator}x", meio + 10)):
+                rot = fonte.render(texto, True, (20, 20, 20), BRANCO)
+                tela.blit(rot, (x, 8))
+
         if self.clique is not None:
             pygame.draw.rect(tela, (0, 160, 0), (*[v - CELULA / 2 for v in
                              centro_na_tela(*self.clique)], CELULA, CELULA), 2)
 
         y_txt = LINHAS * CELULA + 8
         tela.blit(fonte.render(self.info, True, (20, 20, 20)), (10, y_txt))
-        ajuda = ("1 árvore  2 segmento  3 polígono  N novo  Enter fecha  Espaço anima  "
-                 "B algoritmo  L reta  S salvar")
+        ajuda = ("1 árvore  2 segmento  3 polígono  4 antialiasing  N novo  Enter fecha  "
+                 "Espaço anima  K fator  T cena  B algoritmo  L reta  S salvar")
         tela.blit(fonte.render(ajuda, True, (90, 90, 90)), (10, y_txt + 24))
 
     def salvar(self, tela):
@@ -216,6 +251,8 @@ class App:
         pasta.mkdir(parents=True, exist_ok=True)
         if self.modo == 3:
             caminho = pasta / "scanline_poligono.png"
+        elif self.modo == 4:
+            caminho = pasta / f"antialiasing_{self.cena_aa}_ssaa{self.fator}.png"
         else:
             nome = "raster_arvore" if self.modo == 1 else "raster_segmento"
             caminho = pasta / f"{nome}_{self.algoritmo.lower()}.png"
@@ -266,7 +303,13 @@ def main():
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     rodando = False
-                elif evento.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                elif evento.key == pygame.K_k and app.modo == 4:
+                    app.fator = {2: 4, 4: 8, 8: 2}[app.fator]
+                    app.rasterizar()
+                elif evento.key == pygame.K_t and app.modo == 4:
+                    app.cena_aa = "árvore" if app.cena_aa == "leque" else "leque"
+                    app.rasterizar()
+                elif evento.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
                     app.modo = evento.key - pygame.K_0
                     app.clique = None
                     app.anim = None
