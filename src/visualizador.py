@@ -2,8 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 3: transformações geométricas e câmera com matrizes próprias
-(transformacoes.py), projeção ortográfica x perspectiva e modelos 2D e 3D.
+Versão 4: tubos 3D com espessura proporcional ao raio, além das
+transformações e da câmera com matrizes próprias (transformacoes.py).
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -38,7 +38,7 @@ from OpenGL.GL import *
 
 import transformacoes as T
 from cores import mapear_cores
-from geometria import faixas_2d
+from geometria import faixas_2d, tubos_3d
 from leitor_vtk import ler_vtk
 
 LARGURA, ALTURA = 900, 900
@@ -66,7 +66,7 @@ class Estado:
         self.mapa = 0
         self.exagero = 2.0
         self.eixos = True
-        self.vertices = self.cores = None
+        self.vertices = self.cores = self.normais = None
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -117,19 +117,36 @@ class Estado:
         if self.modo == 2:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
-        # Faixas só existem para 2D; nos modelos 3D os tubos vêm no próximo passo
-        if self.modo == 0 or arv.eh_3d:
+        raio = arv.raios * MM_PARA_M * self.exagero
+        self.normais = None
+        if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
             self.cores = np.repeat(cores_seg, 2, axis=0)
             self.primitiva = GL_LINES
-        else:
-            meia = arv.raios * MM_PARA_M * self.exagero
-            self.vertices, seg_id = faixas_2d(arv.pontos, arv.segmentos, meia)
+        elif not arv.eh_3d:                   # 2D: faixas planas
+            self.vertices, seg_id = faixas_2d(arv.pontos, arv.segmentos, raio)
+            self.cores = cores_seg[seg_id]
+            self.primitiva = GL_TRIANGLES
+        else:                                 # 3D: tubos com normais para iluminação
+            self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
             self.cores = cores_seg[seg_id]
             self.primitiva = GL_TRIANGLES
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
         self.cores = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.enviar_para_gpu()
+
+    def enviar_para_gpu(self):
+        """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
+        Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
+        if not hasattr(self, "vbos"):
+            self.vbos = glGenBuffers(3)
+        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais)):
+            if dados is not None:
+                dados = np.ascontiguousarray(dados, dtype=np.float32)
+                glBindBuffer(GL_ARRAY_BUFFER, vbo)
+                glBufferData(GL_ARRAY_BUFFER, dados.nbytes, dados, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     def descricao(self):
         proj = "perspectiva" if self.perspectiva else "ortográfica"
@@ -142,13 +159,40 @@ def desenhar_arvore(estado):
     glMatrixMode(GL_MODELVIEW)
     glLoadMatrixf(T.para_opengl(estado.matriz_visao() @ estado.matriz_modelo()))
 
+    vbo_v, vbo_c, vbo_n = estado.vbos
+    iluminar = estado.normais is not None
+    if iluminar:
+        glEnable(GL_LIGHTING)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_n)
+        glNormalPointer(GL_FLOAT, 0, None)     # None = começa no início do buffer
+
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
-    glVertexPointer(3, GL_FLOAT, 0, estado.vertices)
-    glColorPointer(3, GL_FLOAT, 0, estado.cores)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_v)
+    glVertexPointer(3, GL_FLOAT, 0, None)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_c)
+    glColorPointer(3, GL_FLOAT, 0, None)
     glDrawArrays(estado.primitiva, 0, len(estado.vertices))
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
     glDisableClientState(GL_COLOR_ARRAY)
     glDisableClientState(GL_VERTEX_ARRAY)
+
+    if iluminar:
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisable(GL_LIGHTING)
+
+
+def configurar_iluminacao():
+    """Iluminação da API (OpenGL fixo), usada só para dar volume aos tubos.
+    Uma luz direcional + luz ambiente; o estudo de iluminação é tema do TP2."""
+    glEnable(GL_LIGHT0)
+    glLightfv(GL_LIGHT0, GL_AMBIENT, (0.5, 0.5, 0.5, 1.0))
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.6, 0.6, 0.6, 1.0))
+    glEnable(GL_COLOR_MATERIAL)                     # a cor do vértice vira o material
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+    glEnable(GL_NORMALIZE)                          # a matriz M tem escala: renormaliza
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
 
 
 def desenhar_eixos(estado):
@@ -207,6 +251,11 @@ def desenhar_quadro(estado, fonte):
     glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
     glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
     glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
+
+    # Luz definida com a modelview identidade: fica presa à câmera ("lanterna")
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.6, 1.0, 0.0))
     if estado.eixos:
         desenhar_eixos(estado)
     desenhar_arvore(estado)
@@ -275,6 +324,7 @@ def main():
     glLineWidth(2.0)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    configurar_iluminacao()
 
     estado = Estado(arvore)
     estado.reconstruir()
