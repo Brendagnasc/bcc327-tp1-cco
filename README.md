@@ -80,6 +80,12 @@ python src/recorte.py                        # rastro de Cohen–Sutherland e Li
 python src/recorte.py poligono               # rastro de Sutherland–Hodgman e Weiler–Atherton
 ```
 
+Todas as figuras do relatório e da apresentação podem ser regeradas com um único comando (uma janela OpenGL abre por alguns segundos):
+
+```bash
+python src/gerar_figuras.py                  # 36 figuras em report/figures/
+```
+
 ## Comandos do visualizador
 
 | Entrada | Ação |
@@ -98,6 +104,7 @@ python src/recorte.py poligono               # rastro de Sutherland–Hodgman e 
 | `C` | Mapa de cores: jet / viridis |
 | `+` / `-` | Exagero da espessura |
 | `M` | Liga/desliga o MSAA 4x |
+| `S` | Salva a tela atual em `report/figures/` |
 | `ESC` | Sai |
 
 ## Comandos do modo didático
@@ -187,7 +194,8 @@ Nenhum pixel do modo didático é gerado pela biblioteca: o pygame-ce apenas amp
 │   ├── antialiasing.py
 │   ├── recorte.py
 │   ├── visualizador.py
-│   └── modo_didatico.py
+│   ├── modo_didatico.py
+│   └── gerar_figuras.py
 ├── data/            modelos VTK
 ├── report/          relatório (LaTeX) e figuras
 ├── presentation/    apresentação (Beamer) e figuras
