@@ -24,10 +24,11 @@ Teclas e mouse:
     G        (modo 5) algoritmo: Cohen–Sutherland / Liang–Barsky
     V        (modo 5) vista: sobreposto / antes / depois
     I        (modo 5) imprime no terminal a tabela do recorte
-    6        modo recorte de polígonos: Sutherland–Hodgman
+    6        modo recorte de polígonos: Sutherland–Hodgman / Weiler–Atherton
     arrastar (modo 6) desenha uma nova janela de recorte
+    W        (modo 6) algoritmo: Sutherland–Hodgman / Weiler–Atherton
     P        (modo 6) polígono sujeito: região de interesse / forma em U
-    J        (modo 6) janela: retângulo / hexágono convexo
+    J        (modo 6) janela: retângulo / hexágono convexo / L côncavo
     V        (modo 6) vista: sobreposto / antes / depois
     I        (modo 6) imprime no terminal o polígono após cada aresta da janela
     N        (modo 3) novo polígono: clique nos vértices e feche com Enter
@@ -50,7 +51,8 @@ from leitor_vtk import ler_vtk
 from rasterizacao import (bresenham, dda, imprimir_rastro, imprimir_scanline,
                           scanline_linhas)
 from recorte import (ALGORITMOS_RECORTE, bits, classificar, codigo_regiao, liang_barsky,
-                     pontes_degeneradas, retangulo_para_poligono, sutherland_hodgman)
+                     pontes_degeneradas, retangulo_para_poligono, sutherland_hodgman,
+                     weiler_atherton)
 
 COLUNAS, LINHAS = 80, 60          # tamanho do framebuffer, em pixels
 CELULA = 12                       # cada pixel vira um quadrado de 12x12 na tela
@@ -66,6 +68,8 @@ COR_JANELA = (220, 0, 0)
 JANELA_PADRAO = (22.0, 14.0, 56.0, 42.0)    # (xmin, ymin, xmax, ymax)
 VISTAS_RECORTE = ["sobreposto", "antes", "depois"]
 COR_PONTE = (200, 0, 200)         # arestas degeneradas do Sutherland–Hodgman
+CORES_PEDACOS = [(255, 214, 150), (170, 215, 255), (190, 240, 170), (255, 190, 220)]
+TIPOS_JANELA = ["retângulo", "hexágono", "L côncavo"]
 
 # Polígono côncavo em U: com a janela padrão, a base fica de fora e
 # o resultado correto seriam DOIS pedaços (os braços do U)
@@ -147,6 +151,7 @@ class App:
         self.arrasto = None                         # canto inicial ao arrastar
         self.sujeito = "região de interesse"
         self.tipo_janela = "retângulo"
+        self.alg_poligono = "Sutherland–Hodgman"
         self.info = ""
 
     # ------------------------------------------------------------ rasterizar
@@ -283,11 +288,13 @@ class App:
     def poligono_janela(self):
         if self.tipo_janela == "retângulo":
             return retangulo_para_poligono(self.janela)
-        # hexágono convexo inscrito no retângulo da janela
         xmin, ymin, xmax, ymax = self.janela
-        q, cy = (xmax - xmin) / 4, (ymin + ymax) / 2
-        return [(xmin + q, ymin), (xmax - q, ymin), (xmax, cy),
-                (xmax - q, ymax), (xmin + q, ymax), (xmin, cy)]
+        q, cx, cy = (xmax - xmin) / 4, (xmin + xmax) / 2, (ymin + ymax) / 2
+        if self.tipo_janela == "hexágono":       # convexo, inscrito no retângulo
+            return [(xmin + q, ymin), (xmax - q, ymin), (xmax, cy),
+                    (xmax - q, ymax), (xmin + q, ymax), (xmin, cy)]
+        # "L côncavo": retângulo sem o quadrante superior direito
+        return [(xmin, ymin), (xmax, ymin), (xmax, cy), (cx, cy), (cx, ymax), (xmin, ymax)]
 
     def preencher_e_contornar(self, poligono, f, cor_fundo, cor_borda):
         """Preenche com o nosso Scanline e contorna com o nosso Bresenham."""
@@ -300,35 +307,57 @@ class App:
         for i in range(n):
             self.fb.acender(f(*inteiro(poligono[i]), *inteiro(poligono[(i + 1) % n])), cor_borda)
 
+    def recortar_poligono(self):
+        """Lista de polígonos resultantes (o SH sempre devolve no máximo um)."""
+        sujeito, janela = self.poligono_sujeito(), self.poligono_janela()
+        if self.alg_poligono == "Weiler–Atherton":
+            return weiler_atherton(sujeito, janela)
+        res = sutherland_hodgman(sujeito, janela)
+        return [res] if len(res) >= 3 else []
+
     def rasterizar_recorte_poligono(self, f):
         vista = VISTAS_RECORTE[self.vista_recorte]
         sujeito = self.poligono_sujeito()
-        recortado = sutherland_hodgman(sujeito, self.poligono_janela())
-        self.pontes = pontes_degeneradas(recortado) if len(recortado) >= 3 else []
+        pedacos = self.recortar_poligono()
+        self.pontes = [p for pedaco in pedacos for p in pontes_degeneradas(pedaco)]
 
         if vista == "antes":
             self.preencher_e_contornar(sujeito, f, COR_REGIAO, COR_BORDA)
         else:
             if vista == "sobreposto":
                 self.preencher_e_contornar(sujeito, f, None, COR_DESCARTE)
-            if len(recortado) >= 3:
-                self.preencher_e_contornar(recortado, f, COR_REGIAO, COR_BORDA)
+            for i, pedaco in enumerate(pedacos):     # uma cor por polígono resultante
+                self.preencher_e_contornar(pedaco, f, CORES_PEDACOS[i % len(CORES_PEDACOS)],
+                                           COR_BORDA)
 
-        aviso = (f" | {len(self.pontes)} ponte(s) degenerada(s) em magenta"
-                 if self.pontes and vista != "antes" else "")
-        self.info = (f"Sutherland–Hodgman | {self.sujeito} | janela {self.tipo_janela} | "
-                     f"vista {vista} | {len(sujeito)} -> {len(recortado)} vértices{aviso}")
+        avisos = ""
+        if vista != "antes":
+            if self.pontes:
+                avisos += f" | {len(self.pontes)} ponte(s) degenerada(s) em magenta"
+            if self.alg_poligono == "Sutherland–Hodgman" and self.tipo_janela == "L côncavo":
+                avisos += " | janela côncava: SH falha"
+        self.info = (f"{self.alg_poligono} | {self.sujeito} | janela {self.tipo_janela} | "
+                     f"vista {vista} | {len(pedacos)} polígono(s){avisos}")
 
     def imprimir_recorte_poligono(self):
         janela = self.poligono_janela()
-        print(f"\nSutherland–Hodgman | sujeito: {self.sujeito} | janela: {self.tipo_janela}")
+        print(f"\n{self.alg_poligono} | sujeito: {self.sujeito} | janela: {self.tipo_janela}")
         print(f"  entrada: {len(self.poligono_sujeito())} vértices")
         r = []
-        sutherland_hodgman(self.poligono_sujeito(), janela, r)
-        for (ax, ay), (bx, by), saida in r:
-            pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in saida)
-            print(f"  após aresta ({ax:.1f}, {ay:.1f})->({bx:.1f}, {by:.1f}): "
-                  f"{len(saida)} vértices: {pts}")
+        if self.alg_poligono == "Sutherland–Hodgman":
+            sutherland_hodgman(self.poligono_sujeito(), janela, r)
+            for (ax, ay), (bx, by), saida in r:
+                pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in saida)
+                print(f"  após aresta ({ax:.1f}, {ay:.1f})->({bx:.1f}, {by:.1f}): "
+                      f"{len(saida)} vértices: {pts}")
+        else:
+            pedacos = weiler_atherton(self.poligono_sujeito(), janela, r)
+            print("  interseções ao longo do sujeito:")
+            for x, y, tipo in r:
+                print(f"    ({x:.1f}, {y:.1f}) {tipo}")
+            for i, p in enumerate(pedacos):
+                pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in p)
+                print(f"  polígono {i + 1}: {pts}")
 
     def avancar_animacao(self):
         if self.anim is None:
@@ -398,7 +427,7 @@ class App:
             3: "N novo  Enter fecha  Espaço anima",
             4: "K fator  T cena",
             5: "arraste para nova janela  G algoritmo  V vista  I tabela",
-            6: "arraste para nova janela  P polígono  J janela  V vista  I tabela",
+            6: "arraste para nova janela  W algoritmo  P polígono  J janela  V vista  I tabela",
         }[self.modo]
         ajuda = f"1-6 modos  |  {especifica}  |  S salvar  ESC sair"
         tela.blit(fonte.render(ajuda, True, (90, 90, 90)), (10, y_txt + 24))
@@ -415,9 +444,10 @@ class App:
             caminho = pasta / f"recorte_{VISTAS_RECORTE[self.vista_recorte]}_{alg}.png"
         elif self.modo == 6:
             suj = "regiao" if self.sujeito.startswith("região") else "u"
-            jan = "retangulo" if self.tipo_janela == "retângulo" else "hexagono"
-            caminho = pasta / (f"sutherland_hodgman_{suj}_{jan}_"
-                               f"{VISTAS_RECORTE[self.vista_recorte]}.png")
+            jan = {"retângulo": "retangulo", "hexágono": "hexagono",
+                   "L côncavo": "l_concavo"}[self.tipo_janela]
+            alg = "sh" if self.alg_poligono.startswith("Sutherland") else "wa"
+            caminho = pasta / f"poligono_{alg}_{suj}_{jan}_{VISTAS_RECORTE[self.vista_recorte]}.png"
         else:
             nome = "raster_arvore" if self.modo == 1 else "raster_segmento"
             caminho = pasta / f"{nome}_{self.algoritmo.lower()}.png"
@@ -499,7 +529,12 @@ def main():
                                    else "região de interesse")
                     app.rasterizar()
                 elif evento.key == pygame.K_j and app.modo == 6:
-                    app.tipo_janela = "hexágono" if app.tipo_janela == "retângulo" else "retângulo"
+                    i = TIPOS_JANELA.index(app.tipo_janela)
+                    app.tipo_janela = TIPOS_JANELA[(i + 1) % len(TIPOS_JANELA)]
+                    app.rasterizar()
+                elif evento.key == pygame.K_w and app.modo == 6:
+                    app.alg_poligono = ("Weiler–Atherton" if app.alg_poligono == "Sutherland–Hodgman"
+                                        else "Sutherland–Hodgman")
                     app.rasterizar()
                 elif evento.key == pygame.K_i and app.modo == 6:
                     app.imprimir_recorte_poligono()
