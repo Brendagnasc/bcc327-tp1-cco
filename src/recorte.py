@@ -10,6 +10,9 @@ janela = (xmin, ymin, xmax, ymax):
 
 Cada função retorna o segmento recortado (x0, y0, x1, y1) ou None se
 o segmento estiver totalmente fora.
+
+Polígonos contra uma janela convexa qualquer (retângulo incluído):
+- sutherland_hodgman: recorta o polígono sujeito borda a borda da janela
 """
 
 import random
@@ -135,6 +138,123 @@ def bits(c):
     return format(c, "04b")
 
 
+# ------------------------------------------------------------------ polígonos
+def _vetorial(ax, ay, bx, by):
+    return ax * by - ay * bx
+
+
+def area_com_sinal(poligono):
+    """Fórmula do laço (shoelace): positiva se os vértices estão em sentido anti-horário."""
+    n = len(poligono)
+    return 0.5 * sum(_vetorial(*poligono[i], *poligono[(i + 1) % n]) for i in range(n))
+
+
+def retangulo_para_poligono(janela):
+    xmin, ymin, xmax, ymax = janela
+    return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+
+def sutherland_hodgman(sujeito, janela, rastro=None):
+    """Recorte de polígonos de Sutherland–Hodgman.
+
+    sujeito: polígono qualquer (convexo ou côncavo), lista de (x, y)
+    janela:  polígono CONVEXO, lista de (x, y)
+
+    A janela é tratada como a interseção de semiplanos, um por aresta.
+    O polígono passa por um "filtro" para cada aresta A->B da janela; o
+    filtro percorre as arestas S->P do polígono e aplica 4 casos:
+        S dentro, P dentro  -> emite P
+        S dentro, P fora    -> emite a interseção I
+        S fora,   P fora    -> não emite nada
+        S fora,   P dentro  -> emite I e depois P
+    A saída de um filtro é a entrada do próximo (pipeline).
+
+    'dentro' = à esquerda da aresta A->B (janela em sentido anti-horário).
+    """
+    if area_com_sinal(janela) < 0:
+        janela = janela[::-1]                       # garante anti-horário
+
+    saida = list(sujeito)
+    n = len(janela)
+    for k in range(n):
+        ax, ay = janela[k]
+        bx, by = janela[(k + 1) % n]
+        ex, ey = bx - ax, by - ay                   # direção da aresta da janela
+
+        def dentro(pt):
+            return _vetorial(ex, ey, pt[0] - ax, pt[1] - ay) >= 0
+
+        def intersecao(s, p):
+            # S + t (P - S) sobre a reta A-B:  t = -(E x (S - A)) / (E x (P - S))
+            t = (-_vetorial(ex, ey, s[0] - ax, s[1] - ay)
+                 / _vetorial(ex, ey, p[0] - s[0], p[1] - s[1]))
+            return (s[0] + t * (p[0] - s[0]), s[1] + t * (p[1] - s[1]))
+
+        entrada, saida = saida, []
+        if not entrada:
+            break
+        s = entrada[-1]
+        for p in entrada:
+            if dentro(p):
+                if not dentro(s):
+                    saida.append(intersecao(s, p))
+                saida.append(p)
+            elif dentro(s):
+                saida.append(intersecao(s, p))
+            s = p
+        if rastro is not None:
+            rastro.append(((ax, ay), (bx, by), list(saida)))
+
+    return saida
+
+
+def pontes_degeneradas(poligono, eps=1e-9):
+    """Trechos onde duas arestas do polígono se sobrepõem em sentidos opostos.
+
+    Quando o recorte de um polígono côncavo deveria gerar pedaços separados,
+    o Sutherland–Hodgman devolve um único polígono, ligando os pedaços por
+    "pontes" de área zero sobre a borda da janela (ida e volta pela mesma
+    linha). Retorna a lista desses trechos [((x0, y0), (x1, y1)), ...].
+    """
+    n = len(poligono)
+    arestas = [(poligono[i], poligono[(i + 1) % n]) for i in range(n)]
+    pontes = []
+    for i, (a, b) in enumerate(arestas):
+        d1 = (b[0] - a[0], b[1] - a[1])
+        comp = (d1[0] ** 2 + d1[1] ** 2) ** 0.5
+        if comp < eps:
+            continue
+        u = (d1[0] / comp, d1[1] / comp)               # direção unitária da aresta i
+        for j in range(i + 1, n):
+            c, d = arestas[j]
+            d2 = (d[0] - c[0], d[1] - c[1])
+            colinear = (abs(_vetorial(*d1, *d2)) < eps
+                        and abs(_vetorial(*d1, c[0] - a[0], c[1] - a[1])) < eps)
+            opostas = d1[0] * d2[0] + d1[1] * d2[1] < 0
+            if not (colinear and opostas):
+                continue
+            # projeta a aresta j sobre a reta da aresta i e mede a sobreposição
+            proj = lambda pt: (pt[0] - a[0]) * u[0] + (pt[1] - a[1]) * u[1]
+            lo, hi = sorted((proj(c), proj(d)))
+            t0, t1 = max(lo, 0.0), min(hi, comp)
+            if t1 - t0 > eps:
+                pontes.append(((a[0] + t0 * u[0], a[1] + t0 * u[1]),
+                               (a[0] + t1 * u[0], a[1] + t1 * u[1])))
+    return pontes
+
+
+def exemplo_poligono():
+    """Rastro do Sutherland–Hodgman (exemplo do relatório)."""
+    janela = retangulo_para_poligono((10, 10, 30, 25))
+    sujeito = [(5, 15), (20, 3), (35, 18), (22, 32), (18, 20)]
+    print(f"Sutherland–Hodgman\n  janela  {janela}\n  sujeito {sujeito}")
+    r = []
+    sutherland_hodgman(sujeito, janela, r)
+    for a, b, saida in r:
+        pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in saida)
+        print(f"  após aresta {a}->{b}: {len(saida)} vértices: {pts}")
+
+
 def exemplo_rastro():
     """Mesmo segmento recortado pelos dois algoritmos (exemplo do relatório)."""
     janela = (10, 10, 30, 25)
@@ -189,5 +309,9 @@ def comparar(n=100_000, semente=0):
 
 
 if __name__ == "__main__":
-    exemplo_rastro()
-    comparar()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "poligono":
+        exemplo_poligono()
+    else:
+        exemplo_rastro()
+        comparar()
