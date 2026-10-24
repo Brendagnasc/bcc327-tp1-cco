@@ -20,6 +20,7 @@ Teclas e mouse:
     A                      mostra / esconde os eixos do mundo
     R                      restaura transformações e vista
     M                      liga / desliga o antialiasing MSAA
+    S                      salva a tela em report/figures/
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -28,6 +29,7 @@ Teclas e mouse:
 
 import os
 import sys
+from pathlib import Path
 
 # No Linux/WSL (WSLg) a variável WAYLAND_DISPLAY existe e o PyOpenGL tentaria usar
 # EGL, mas o pygame cria o contexto via X11/GLX. Forçar GLX evita esse conflito.
@@ -362,6 +364,35 @@ def tratar_tecla(estado, tecla):
         estado.msaa = not estado.msaa
 
 
+def inicializar_gl():
+    """Estado inicial do OpenGL (usado pelo main e pelo gerador de figuras)."""
+    glClearColor(*FUNDO, 1.0)
+    glLineWidth(2.0)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    configurar_iluminacao()
+
+
+def capturar(caminho):
+    """Lê o framebuffer da janela e salva em PNG (chamar antes do flip)."""
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    glPixelStorei(GL_PACK_ALIGNMENT, 1)
+    dados = glReadPixels(0, 0, LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE)
+    # o OpenGL lê de baixo para cima; flipped=True inverte para a imagem
+    imagem = pygame.image.frombytes(bytes(dados), (LARGURA, ALTURA), "RGB", True)
+    pygame.image.save(imagem, str(caminho))
+    print("salvo:", caminho)
+
+
+def nome_captura(estado):
+    proj = "persp" if estado.perspectiva else "orto"
+    vista = ["frontal", "lateral", "superior", "isometrica"][estado.vista]
+    modo = ["linhas", "espessura", "solido"][estado.modo]
+    aa = "_msaa" if estado.msaa else ""
+    return f"report/figures/vis_{estado.arvore.nome}_{modo}_{vista}_{proj}{aa}.png"
+
+
 def main():
     caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree2D_Nterm064.vtk"
     arvore = ler_vtk(caminho)
@@ -372,11 +403,7 @@ def main():
     pygame.display.set_caption(f"TP1 CCO - {arvore.nome}")
     fonte = pygame.font.Font(None, 24)
 
-    glClearColor(*FUNDO, 1.0)
-    glLineWidth(2.0)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    configurar_iluminacao()
+    inicializar_gl()
 
     estado = Estado(arvore)
     estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
@@ -385,12 +412,15 @@ def main():
     relogio = pygame.time.Clock()
     rodando = True
     while rodando:
+        salvar = False
         for evento in pygame.event.get():
             if evento.type == pygame.QUIT:
                 rodando = False
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     rodando = False
+                elif evento.key == pygame.K_s:
+                    salvar = True
                 else:
                     tratar_tecla(estado, evento.key)
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
@@ -401,6 +431,8 @@ def main():
                 estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
         desenhar_quadro(estado, fonte)
+        if salvar:
+            capturar(nome_captura(estado))
         pygame.display.flip()
         relogio.tick(60)
 
