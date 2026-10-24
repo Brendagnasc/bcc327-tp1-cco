@@ -2,8 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 4: tubos 3D com espessura proporcional ao raio, além das
-transformações e da câmera com matrizes próprias (transformacoes.py).
+Versão 5: MSAA ligável (antialiasing da API), tubos 3D com espessura
+proporcional ao raio e câmera com matrizes próprias (transformacoes.py).
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -19,6 +19,7 @@ Teclas e mouse:
     P                      alterna projeção ortográfica / perspectiva
     A                      mostra / esconde os eixos do mundo
     R                      restaura transformações e vista
+    M                      liga / desliga o antialiasing MSAA
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -66,6 +67,9 @@ class Estado:
         self.mapa = 0
         self.exagero = 2.0
         self.eixos = True
+        self.msaa = False
+        self.fbo_msaa = None            # framebuffer multiamostrado (criado em main)
+        self.amostras_msaa = 0
         self.vertices = self.cores = self.normais = None
         self.primitiva = GL_LINES
 
@@ -150,8 +154,12 @@ class Estado:
 
     def descricao(self):
         proj = "perspectiva" if self.perspectiva else "ortográfica"
+        if self.amostras_msaa == 0:
+            aa = "MSAA indisponível"
+        else:
+            aa = f"MSAA {self.amostras_msaa}x ligado" if self.msaa else "MSAA desligado"
         return (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
-                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x")
+                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x | {aa}")
 
 
 # -------------------------------------------------------------------- desenho
@@ -245,7 +253,39 @@ def desenhar_barra_cores(estado, fonte):
     desenhar_texto(fonte, "raio (mm)", LARGURA / 2 - 35, y1 + 6)
 
 
+def criar_fbo_msaa(amostras=4):
+    """Cria um framebuffer fora da tela (FBO) com várias amostras por pixel.
+
+    MSAA: cada pixel guarda 'amostras' valores de cor e profundidade, um por
+    posição de amostra. O teste de cobertura e de profundidade é feito por
+    amostra, mas o fragmento é sombreado uma vez só por pixel (mais barato
+    que o supersampling). No final, glBlitFramebuffer faz a "resolução":
+    a média das amostras de cada pixel vai para a janela.
+    """
+    try:
+        amostras = min(amostras, glGetIntegerv(GL_MAX_SAMPLES))
+        fbo = glGenFramebuffers(1)
+        cor, prof = glGenRenderbuffers(2)
+        glBindRenderbuffer(GL_RENDERBUFFER, cor)
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, amostras, GL_RGBA8, LARGURA, ALTURA)
+        glBindRenderbuffer(GL_RENDERBUFFER, prof)
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, amostras, GL_DEPTH_COMPONENT24,
+                                         LARGURA, ALTURA)
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, cor)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, prof)
+        completo = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+        return (fbo, amostras) if completo else (None, 0)
+    except Exception:
+        return None, 0
+
+
 def desenhar_quadro(estado, fonte):
+    usar_msaa = estado.msaa and estado.fbo_msaa is not None
+    if usar_msaa:                              # desenha a cena no FBO multiamostrado
+        glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
@@ -259,6 +299,13 @@ def desenhar_quadro(estado, fonte):
     if estado.eixos:
         desenhar_eixos(estado)
     desenhar_arvore(estado)
+
+    if usar_msaa:                              # resolve: média das amostras -> janela
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+        glBlitFramebuffer(0, 0, LARGURA, ALTURA, 0, 0, LARGURA, ALTURA,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
     if estado.modo != 2:
@@ -309,13 +356,16 @@ def tratar_tecla(estado, tecla):
         estado.eixos = not estado.eixos
     elif tecla == pygame.K_r:
         estado.restaurar()
+    elif tecla == pygame.K_m and estado.amostras_msaa > 0:
+        estado.msaa = not estado.msaa
 
 
 def main():
     caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree2D_Nterm064.vtk"
     arvore = ler_vtk(caminho)
 
-    pygame.init()
+    pygame.display.init()             # só vídeo e fonte (evita iniciar o áudio)
+    pygame.font.init()
     pygame.display.set_mode((LARGURA, ALTURA), pygame.OPENGL | pygame.DOUBLEBUF)
     pygame.display.set_caption(f"TP1 CCO - {arvore.nome}")
     fonte = pygame.font.Font(None, 24)
@@ -327,6 +377,7 @@ def main():
     configurar_iluminacao()
 
     estado = Estado(arvore)
+    estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
     estado.reconstruir()
 
     relogio = pygame.time.Clock()
