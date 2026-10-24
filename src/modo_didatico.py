@@ -19,6 +19,11 @@ Teclas e mouse:
     4        modo antialiasing: mesma cena sem (esquerda) e com SSAA (direita)
     K        (modo 4) fator de supersampling: 2 / 4 / 8
     T        (modo 4) cena: leque de linhas / árvore CCO
+    5        modo recorte: segmentos da árvore contra uma janela retangular
+    arrastar (modo 5) desenha uma nova janela de recorte
+    G        (modo 5) algoritmo: Cohen–Sutherland / Liang–Barsky
+    V        (modo 5) vista: sobreposto / antes / depois
+    I        (modo 5) imprime no terminal a tabela do recorte
     N        (modo 3) novo polígono: clique nos vértices e feche com Enter
     Espaço   (modo 3) anima o preenchimento linha a linha
     B        alterna o algoritmo de segmentos: Bresenham / DDA
@@ -38,6 +43,7 @@ from cores import mapear_cores
 from leitor_vtk import ler_vtk
 from rasterizacao import (bresenham, dda, imprimir_rastro, imprimir_scanline,
                           scanline_linhas)
+from recorte import ALGORITMOS_RECORTE, bits, classificar, codigo_regiao, liang_barsky
 
 COLUNAS, LINHAS = 80, 60          # tamanho do framebuffer, em pixels
 CELULA = 12                       # cada pixel vira um quadrado de 12x12 na tela
@@ -48,6 +54,10 @@ ALGORITMOS = {"Bresenham": bresenham, "DDA": dda}
 COR_REGIAO = (255, 214, 150)      # preenchimento do polígono
 COR_BORDA = (200, 90, 0)          # contorno do polígono
 COR_ARVORE_FUNDO = (150, 150, 150)
+COR_DESCARTE = (205, 205, 205)    # partes removidas pelo recorte
+COR_JANELA = (220, 0, 0)
+JANELA_PADRAO = (22.0, 14.0, 56.0, 42.0)    # (xmin, ymin, xmax, ymax)
+VISTAS_RECORTE = ["sobreposto", "antes", "depois"]
 
 # Polígono côncavo de exemplo: uma região de interesse sobre a árvore
 POLIGONO_PADRAO = [(16, 10), (42, 6), (64, 16), (52, 30), (66, 46),
@@ -118,6 +128,11 @@ class App:
         self.anim = None                            # linha atual da animação
         self.fator = 4                              # supersampling do modo 4
         self.cena_aa = "leque"
+        self.segs_reais = segmentos_da_arvore(arvore, arredondar=False)
+        self.janela = JANELA_PADRAO
+        self.alg_recorte = "Cohen–Sutherland"
+        self.vista_recorte = 0
+        self.arrasto = None                         # canto inicial ao arrastar
         self.info = ""
 
     # ------------------------------------------------------------ rasterizar
@@ -137,6 +152,8 @@ class App:
             self.rasterizar_poligono(f)
         elif self.modo == 4:
             self.rasterizar_antialiasing()
+        elif self.modo == 5:
+            self.rasterizar_recorte(f)
         else:
             x0, y0, x1, y1 = self.segmento
             px = f(x0, y0, x1, y1)
@@ -195,6 +212,55 @@ class App:
         self.info = (f"Antialiasing | cena {self.cena_aa} | esquerda: sem AA | "
                      f"direita: SSAA {self.fator}x ({self.fator ** 2} amostras por pixel)")
 
+    def recortar_todos(self):
+        f = ALGORITMOS_RECORTE[self.alg_recorte]
+        return [f(*seg, self.janela) for seg in self.segs_reais]
+
+    def rasterizar_recorte(self, f):
+        """O recorte é feito em coordenadas reais; só depois os pedaços que
+        sobraram são rasterizados com Bresenham."""
+        inteiro = lambda seg: tuple(int(round(v)) for v in seg)
+        vista = VISTAS_RECORTE[self.vista_recorte]
+        recortados = self.recortar_todos()
+        ordem = np.argsort(self.arvore.raios)
+
+        if vista in ("sobreposto", "antes"):
+            cor_antes = COR_DESCARTE if vista == "sobreposto" else None
+            for i in ordem:
+                cor = cor_antes if cor_antes is not None else self.cores_arvore[i]
+                self.fb.acender(f(*inteiro(self.segs_reais[i])), cor)
+        if vista in ("sobreposto", "depois"):
+            for i in ordem:
+                if recortados[i] is not None:
+                    self.fb.acender(f(*inteiro(recortados[i])), self.cores_arvore[i])
+
+        cont = {"inteiro": 0, "recortado": 0, "rejeitado": 0}
+        for seg, rec in zip(self.segs_reais, recortados):
+            cont[classificar(seg, rec)] += 1
+        self.info = (f"{self.alg_recorte} | vista {vista} | {cont['inteiro']} inteiros, "
+                     f"{cont['recortado']} recortados, {cont['rejeitado']} rejeitados")
+
+    def imprimir_recorte(self):
+        xmin, ymin, xmax, ymax = self.janela
+        print(f"\n{self.alg_recorte} | janela x [{xmin:.0f}, {xmax:.0f}]  y [{ymin:.0f}, {ymax:.0f}]")
+        if self.alg_recorte == "Cohen–Sutherland":
+            print(f"{'seg':>4}  {'c0':>4}  {'c1':>4}  {'c0|c1':>5}  {'c0&c1':>5}  resultado")
+            for i, (seg, rec) in enumerate(zip(self.segs_reais, self.recortar_todos())):
+                c0 = codigo_regiao(seg[0], seg[1], self.janela)
+                c1 = codigo_regiao(seg[2], seg[3], self.janela)
+                print(f"{i:>4}  {bits(c0)}  {bits(c1)}  {bits(c0 | c1):>5}  "
+                      f"{bits(c0 & c1):>5}  {classificar(seg, rec)}")
+        else:
+            print(f"{'seg':>4}  {'t0':>6}  {'t1':>6}  resultado")
+            for i, seg in enumerate(self.segs_reais):
+                r = []
+                rec = liang_barsky(*seg, self.janela, r)
+                if rec is None:       # parou antes: mostra a borda que o eliminou
+                    print(f"{i:>4}  {'-':>6}  {'-':>6}  rejeitado na borda {r[-1][0]}")
+                else:
+                    t0, t1 = r[-1][4], r[-1][5]
+                    print(f"{i:>4}  {t0:6.3f}  {t1:6.3f}  {classificar(seg, rec)}")
+
     def avancar_animacao(self):
         if self.anim is None:
             return
@@ -236,14 +302,27 @@ class App:
                 rot = fonte.render(texto, True, (20, 20, 20), BRANCO)
                 tela.blit(rot, (x, 8))
 
+        if self.modo == 5:
+            xmin, ymin, xmax, ymax = self.janela
+            canto_a = centro_na_tela(xmin, ymax)
+            canto_b = centro_na_tela(xmax, ymin)
+            ret = pygame.Rect(canto_a, (canto_b[0] - canto_a[0], canto_b[1] - canto_a[1]))
+            pygame.draw.rect(tela, COR_JANELA, ret, 2)
+
         if self.clique is not None:
             pygame.draw.rect(tela, (0, 160, 0), (*[v - CELULA / 2 for v in
                              centro_na_tela(*self.clique)], CELULA, CELULA), 2)
 
         y_txt = LINHAS * CELULA + 8
         tela.blit(fonte.render(self.info, True, (20, 20, 20)), (10, y_txt))
-        ajuda = ("1 árvore  2 segmento  3 polígono  4 antialiasing  N novo  Enter fecha  "
-                 "Espaço anima  K fator  T cena  B algoritmo  L reta  S salvar")
+        especifica = {
+            1: "B algoritmo  L reta ideal",
+            2: "clique em 2 pixels  B algoritmo  L reta ideal",
+            3: "N novo  Enter fecha  Espaço anima",
+            4: "K fator  T cena",
+            5: "arraste para nova janela  G algoritmo  V vista  I tabela",
+        }[self.modo]
+        ajuda = f"1-5 modos  |  {especifica}  |  S salvar  ESC sair"
         tela.blit(fonte.render(ajuda, True, (90, 90, 90)), (10, y_txt + 24))
 
     def salvar(self, tela):
@@ -253,6 +332,9 @@ class App:
             caminho = pasta / "scanline_poligono.png"
         elif self.modo == 4:
             caminho = pasta / f"antialiasing_{self.cena_aa}_ssaa{self.fator}.png"
+        elif self.modo == 5:
+            alg = "cohen_sutherland" if self.alg_recorte.startswith("Cohen") else "liang_barsky"
+            caminho = pasta / f"recorte_{VISTAS_RECORTE[self.vista_recorte]}_{alg}.png"
         else:
             nome = "raster_arvore" if self.modo == 1 else "raster_segmento"
             caminho = pasta / f"{nome}_{self.algoritmo.lower()}.png"
@@ -260,10 +342,20 @@ class App:
         print("salvo:", caminho)
 
     # ------------------------------------------------------------ eventos
+    def janela_do_arrasto(self, pos):
+        (xa, ya), (xb, yb) = self.arrasto, pixel_do_mouse(pos)
+        if xa != xb and ya != yb:
+            self.janela = (float(min(xa, xb)), float(min(ya, yb)),
+                           float(max(xa, xb)), float(max(ya, yb)))
+            self.rasterizar()
+
     def tratar_clique(self, pos):
         if pos[1] >= LINHAS * CELULA:
             return
         p = pixel_do_mouse(pos)
+        if self.modo == 5:
+            self.arrasto = p
+            return
         if self.modo == 3 and self.editando:
             self.poligono.append(p)
             self.rasterizar()
@@ -300,6 +392,12 @@ def main():
                 rodando = False
             elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1:
                 app.tratar_clique(evento.pos)
+            elif evento.type == pygame.MOUSEMOTION and app.arrasto is not None:
+                app.janela_do_arrasto(evento.pos)
+            elif evento.type == pygame.MOUSEBUTTONUP and evento.button == 1:
+                if app.arrasto is not None:
+                    app.janela_do_arrasto(evento.pos)
+                    app.arrasto = None
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     rodando = False
@@ -309,7 +407,16 @@ def main():
                 elif evento.key == pygame.K_t and app.modo == 4:
                     app.cena_aa = "árvore" if app.cena_aa == "leque" else "leque"
                     app.rasterizar()
-                elif evento.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
+                elif evento.key == pygame.K_g and app.modo == 5:
+                    app.alg_recorte = ("Liang–Barsky" if app.alg_recorte == "Cohen–Sutherland"
+                                       else "Cohen–Sutherland")
+                    app.rasterizar()
+                elif evento.key == pygame.K_v and app.modo == 5:
+                    app.vista_recorte = (app.vista_recorte + 1) % len(VISTAS_RECORTE)
+                    app.rasterizar()
+                elif evento.key == pygame.K_i and app.modo == 5:
+                    app.imprimir_recorte()
+                elif evento.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
                     app.modo = evento.key - pygame.K_0
                     app.clique = None
                     app.anim = None
