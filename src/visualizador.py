@@ -29,9 +29,11 @@ Teclas e mouse:
 import os
 import sys
 
-# No WSL (WSLg) a variável WAYLAND_DISPLAY existe e o PyOpenGL tentaria usar EGL,
-# mas o pygame cria o contexto via X11/GLX. Forçar GLX evita esse conflito.
-os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
+# No Linux/WSL (WSLg) a variável WAYLAND_DISPLAY existe e o PyOpenGL tentaria usar
+# EGL, mas o pygame cria o contexto via X11/GLX. Forçar GLX evita esse conflito.
+# Só vale para Linux: no Windows e no macOS o PyOpenGL escolhe sozinho.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
 
 import numpy as np
 import pygame
