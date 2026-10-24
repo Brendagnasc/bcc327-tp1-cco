@@ -2,16 +2,27 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 2: três modos de representação e barra de cores.
+Versão 3: transformações geométricas e câmera com matrizes próprias
+(transformacoes.py), projeção ortográfica x perspectiva e modelos 2D e 3D.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
 
-Teclas:
-    E    alterna o modo: linhas coloridas / espessura + cor / espessura cor sólida
-    C    alterna o mapa de cores (jet / viridis)
-    + -  aumenta / diminui o fator de exagero da espessura
-    ESC  sai
+Teclas e mouse:
+    arrastar (botão esq.)  rotação em torno de x e y
+    roda do mouse          zoom (aproxima / afasta a câmera)
+    Z / X                  rotação em torno de z
+    setas                  translação em x e y
+    PageUp / PageDown      translação em z
+    , / .                  escala (diminui / aumenta)
+    1 2 3 4                vista frontal / lateral / superior / isométrica
+    P                      alterna projeção ortográfica / perspectiva
+    A                      mostra / esconde os eixos do mundo
+    R                      restaura transformações e vista
+    E                      modo: linhas + cor / espessura + cor / espessura sólida
+    C                      mapa de cores (jet / viridis)
+    + -                    exagero da espessura
+    ESC                    sai
 """
 
 import os
@@ -25,6 +36,7 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import transformacoes as T
 from cores import mapear_cores
 from geometria import faixas_2d
 from leitor_vtk import ler_vtk
@@ -35,6 +47,16 @@ VERMELHO = (0.8, 0.1, 0.1)
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
+FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
+DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
+
+# Vistas do observador: direção de onde a câmera olha e vetor "cima"
+VISTAS = [
+    ("frontal", (0, 0, 1), (0, 1, 0)),
+    ("lateral", (1, 0, 0), (0, 1, 0)),
+    ("superior", (0, 1, 0), (0, 0, -1)),
+    ("isométrica", (1, 1, 1), (0, 1, 0)),
+]
 
 
 class Estado:
@@ -42,19 +64,61 @@ class Estado:
         self.arvore = arvore
         self.modo = 0
         self.mapa = 0
-        self.exagero = 2.0     # espessura desenhada = raio real x exagero
+        self.exagero = 2.0
+        self.eixos = True
         self.vertices = self.cores = None
         self.primitiva = GL_LINES
 
+        # Normalização: leva o modelo para perto da origem com tamanho ~1,
+        # para a mesma câmera servir aos modelos 2D e 3D
+        minimo, maximo = arvore.pontos.min(axis=0), arvore.pontos.max(axis=0)
+        centro = (minimo + maximo) / 2
+        meio = (maximo - minimo).max() / 2
+        self.normalizacao = T.escala(1 / meio, 1 / meio, 1 / meio) @ T.translacao(*(-centro))
+        self.restaurar()
+
+    def restaurar(self):
+        self.tx = self.ty = self.tz = 0.0
+        self.ang_x = self.ang_y = self.ang_z = 0.0
+        self.s = 1.0
+        self.vista = 0
+        self.dist = DIST_PADRAO
+        self.perspectiva = True
+
+    # ---------------------------------------------------------------- matrizes
+    def matriz_modelo(self):
+        """M = T . Rx . Ry . Rz . S . N (lida da direita para a esquerda:
+        normaliza, escala, gira e por último translada)."""
+        return (T.translacao(self.tx, self.ty, self.tz)
+                @ T.rotacao_x(self.ang_x) @ T.rotacao_y(self.ang_y) @ T.rotacao_z(self.ang_z)
+                @ T.escala(self.s, self.s, self.s)
+                @ self.normalizacao)
+
+    def matriz_visao(self):
+        _, direcao, cima = VISTAS[self.vista]
+        direcao = np.array(direcao, dtype=float)
+        olho = direcao / np.linalg.norm(direcao) * self.dist
+        return T.olhar_para(olho, (0, 0, 0), cima)
+
+    def matriz_projecao(self):
+        aspecto = LARGURA / ALTURA
+        if self.perspectiva:
+            return T.perspectiva(FOVY, aspecto, 0.01, 100.0)
+        # Caixa ortográfica com a mesma altura que o frustum tem no alvo,
+        # para o modelo não "pular" de tamanho ao trocar de projeção
+        h = self.dist * np.tan(np.radians(FOVY) / 2)
+        return T.ortografica(-h * aspecto, h * aspecto, -h, h, 0.01, 100.0)
+
+    # ---------------------------------------------------------------- geometria
     def reconstruir(self):
-        """Recalcula vértices e cores sempre que o modo, mapa ou exagero muda."""
         arv = self.arvore
         cores_seg = mapear_cores(arv.raios, arv.raios.min(), arv.raios.max(),
                                  MAPAS[self.mapa])
         if self.modo == 2:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
-        if self.modo == 0:
+        # Faixas só existem para 2D; nos modelos 3D os tubos vêm no próximo passo
+        if self.modo == 0 or arv.eh_3d:
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
             self.cores = np.repeat(cores_seg, 2, axis=0)
             self.primitiva = GL_LINES
@@ -66,33 +130,18 @@ class Estado:
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
         self.cores = np.ascontiguousarray(self.cores, dtype=np.float32)
-        pygame.display.set_caption(
-            f"TP1 CCO - {arv.nome} - {MODOS[self.modo]} - mapa {MAPAS[self.mapa]}"
-            f" - exagero {self.exagero:.1f}x")
+
+    def descricao(self):
+        proj = "perspectiva" if self.perspectiva else "ortográfica"
+        return (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
+                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x")
 
 
-def configurar_projecao(arvore):
-    """Projeção ortográfica que enquadra a árvore com margem.
-
-    O centro da janela sobe um pouco para a árvore descer na tela
-    e deixar espaço livre para a barra de cores no topo.
-    """
-    minimo = arvore.pontos[:, :2].min(axis=0)
-    maximo = arvore.pontos[:, :2].max(axis=0)
-    centro = (minimo + maximo) / 2
-    meio = (maximo - minimo).max() / 2 * 1.2
-    centro[1] += meio * 0.1
-
-    aspecto = LARGURA / ALTURA
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    glOrtho(centro[0] - meio * aspecto, centro[0] + meio * aspecto,
-            centro[1] - meio, centro[1] + meio, -1.0, 1.0)
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-
-
+# -------------------------------------------------------------------- desenho
 def desenhar_arvore(estado):
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao() @ estado.matriz_modelo()))
+
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
     glVertexPointer(3, GL_FLOAT, 0, estado.vertices)
@@ -102,6 +151,21 @@ def desenhar_arvore(estado):
     glDisableClientState(GL_VERTEX_ARRAY)
 
 
+def desenhar_eixos(estado):
+    """Eixos do mundo (x vermelho, y verde, z azul). Usam só a matriz de visão,
+    então ficam parados enquanto o modelo é transformado."""
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    for eixo, cor in zip(np.identity(3), np.identity(3) * 0.8):
+        glColor3f(*cor)
+        glVertex3f(0, 0, 0)
+        glVertex3f(*(eixo * 1.3))
+    glEnd()
+    glLineWidth(2.0)
+
+
 def desenhar_texto(fonte, texto, x, y):
     """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
     superficie = fonte.render(texto, True, (20, 20, 20))
@@ -109,7 +173,6 @@ def desenhar_texto(fonte, texto, x, y):
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
                  GL_RGBA, GL_UNSIGNED_BYTE, dados)
-    return superficie.get_width()
 
 
 def desenhar_barra_cores(estado, fonte):
@@ -121,12 +184,10 @@ def desenhar_barra_cores(estado, fonte):
     cores = mapear_cores(valores, valores[0], valores[-1], MAPAS[estado.mapa])
     xs = np.linspace(x0, x1, passos + 1)
 
-    # Troca temporariamente para uma projeção em pixels
     glMatrixMode(GL_PROJECTION)
-    glPushMatrix()
-    glLoadIdentity()
-    glOrtho(0, LARGURA, 0, ALTURA, -1, 1)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, LARGURA, 0, ALTURA, -1, 1)))
     glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
 
     glBegin(GL_QUAD_STRIP)
     for x, cor in zip(xs, cores):
@@ -135,13 +196,70 @@ def desenhar_barra_cores(estado, fonte):
         glVertex2f(x, y1)
     glEnd()
 
-    glMatrixMode(GL_PROJECTION)
-    glPopMatrix()
-    glMatrixMode(GL_MODELVIEW)
-
     desenhar_texto(fonte, f"{arv.raios.min():.3f}", x0 - 55, y0 + 2)
     desenhar_texto(fonte, f"{arv.raios.max():.3f}", x1 + 8, y0 + 2)
     desenhar_texto(fonte, "raio (mm)", LARGURA / 2 - 35, y1 + 6)
+
+
+def desenhar_quadro(estado, fonte):
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+    glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
+    glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
+    glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
+    if estado.eixos:
+        desenhar_eixos(estado)
+    desenhar_arvore(estado)
+
+    glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
+    if estado.modo != 2:
+        desenhar_barra_cores(estado, fonte)
+    desenhar_texto(fonte, estado.descricao(), 10, 10)
+
+
+# -------------------------------------------------------------------- entrada
+def tratar_tecla(estado, tecla):
+    passo = 0.05
+    if tecla == pygame.K_e:
+        estado.modo = (estado.modo + 1) % len(MODOS)
+        estado.reconstruir()
+    elif tecla == pygame.K_c:
+        estado.mapa = (estado.mapa + 1) % len(MAPAS)
+        estado.reconstruir()
+    elif tecla in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+        estado.exagero = min(estado.exagero + 0.5, 10.0)
+        estado.reconstruir()
+    elif tecla in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        estado.exagero = max(estado.exagero - 0.5, 0.5)
+        estado.reconstruir()
+    elif tecla == pygame.K_LEFT:
+        estado.tx -= passo
+    elif tecla == pygame.K_RIGHT:
+        estado.tx += passo
+    elif tecla == pygame.K_UP:
+        estado.ty += passo
+    elif tecla == pygame.K_DOWN:
+        estado.ty -= passo
+    elif tecla == pygame.K_PAGEUP:
+        estado.tz += passo
+    elif tecla == pygame.K_PAGEDOWN:
+        estado.tz -= passo
+    elif tecla == pygame.K_z:
+        estado.ang_z += 5
+    elif tecla == pygame.K_x:
+        estado.ang_z -= 5
+    elif tecla == pygame.K_PERIOD:
+        estado.s *= 1.1
+    elif tecla == pygame.K_COMMA:
+        estado.s /= 1.1
+    elif tecla in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
+        estado.vista = tecla - pygame.K_1
+    elif tecla == pygame.K_p:
+        estado.perspectiva = not estado.perspectiva
+    elif tecla == pygame.K_a:
+        estado.eixos = not estado.eixos
+    elif tecla == pygame.K_r:
+        estado.restaurar()
 
 
 def main():
@@ -150,13 +268,13 @@ def main():
 
     pygame.init()
     pygame.display.set_mode((LARGURA, ALTURA), pygame.OPENGL | pygame.DOUBLEBUF)
+    pygame.display.set_caption(f"TP1 CCO - {arvore.nome}")
     fonte = pygame.font.Font(None, 24)
 
     glClearColor(*FUNDO, 1.0)
     glLineWidth(2.0)
-    glEnable(GL_BLEND)                                  # para o texto com transparência
+    glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    configurar_projecao(arvore)
 
     estado = Estado(arvore)
     estado.reconstruir()
@@ -170,23 +288,16 @@ def main():
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     rodando = False
-                elif evento.key == pygame.K_e:
-                    estado.modo = (estado.modo + 1) % len(MODOS)
-                    estado.reconstruir()
-                elif evento.key == pygame.K_c:
-                    estado.mapa = (estado.mapa + 1) % len(MAPAS)
-                    estado.reconstruir()
-                elif evento.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
-                    estado.exagero = min(estado.exagero + 0.5, 10.0)
-                    estado.reconstruir()
-                elif evento.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                    estado.exagero = max(estado.exagero - 0.5, 0.5)
-                    estado.reconstruir()
+                else:
+                    tratar_tecla(estado, evento.key)
+            elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
+                estado.ang_y += evento.rel[0] * 0.5
+                estado.ang_x += evento.rel[1] * 0.5
+            elif evento.type == pygame.MOUSEWHEEL:
+                fator = 0.9 if evento.y > 0 else 1 / 0.9
+                estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
-        glClear(GL_COLOR_BUFFER_BIT)
-        desenhar_arvore(estado)
-        if estado.modo != 2:
-            desenhar_barra_cores(estado, fonte)
+        desenhar_quadro(estado, fonte)
         pygame.display.flip()
         relogio.tick(60)
 
