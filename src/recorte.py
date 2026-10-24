@@ -11,8 +11,10 @@ janela = (xmin, ymin, xmax, ymax):
 Cada função retorna o segmento recortado (x0, y0, x1, y1) ou None se
 o segmento estiver totalmente fora.
 
-Polígonos contra uma janela convexa qualquer (retângulo incluído):
-- sutherland_hodgman: recorta o polígono sujeito borda a borda da janela
+Polígonos:
+- sutherland_hodgman: janela convexa; recorta o sujeito borda a borda
+- weiler_atherton: janela e sujeito quaisquer (côncavos, sem buracos);
+  percorre as duas fronteiras e devolve uma LISTA de polígonos
 """
 
 import random
@@ -243,6 +245,160 @@ def pontes_degeneradas(poligono, eps=1e-9):
     return pontes
 
 
+def ponto_dentro(x, y, poligono):
+    """Teste par-ímpar: conta quantas arestas um raio horizontal para a direita cruza."""
+    dentro = False
+    n = len(poligono)
+    for i in range(n):
+        (x0, y0), (x1, y1) = poligono[i], poligono[(i + 1) % n]
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            dentro = not dentro
+    return dentro
+
+
+class _No:
+    """Vértice das listas do Weiler–Atherton (original ou interseção)."""
+    __slots__ = ("x", "y", "intersecao", "entrada", "par", "visitado")
+
+    def __init__(self, x, y, intersecao=False):
+        self.x, self.y = x, y
+        self.intersecao = intersecao
+        self.entrada = False
+        self.par = None          # o mesmo ponto na outra lista
+        self.visitado = False
+
+
+def _ponto_na_aresta(p, a, b, eps):
+    ex, ey = b[0] - a[0], b[1] - a[1]
+    comp2 = ex * ex + ey * ey
+    if comp2 == 0:
+        return False
+    t = ((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / comp2
+    if t < -eps or t > 1 + eps:
+        return False
+    return abs(_vetorial(ex, ey, p[0] - a[0], p[1] - a[1])) / comp2 ** 0.5 < eps
+
+
+def _degenerado(sujeito, janela, eps):
+    """Há vértice de um polígono sobre aresta do outro (inclui arestas sobrepostas)?"""
+    for p, q in ((sujeito, janela), (janela, sujeito)):
+        m = len(q)
+        for v in p:
+            if any(_ponto_na_aresta(v, q[k], q[(k + 1) % m], eps) for k in range(m)):
+                return True
+    return False
+
+
+def weiler_atherton(sujeito, janela, rastro=None):
+    """Recorte de polígonos de Weiler–Atherton (interseção sujeito ∩ janela).
+
+    1. Os dois polígonos são colocados em sentido anti-horário.
+    2. Calculam-se todas as interseções entre arestas do sujeito e da janela;
+       cada uma é inserida nas DUAS listas de vértices, na posição certa, e
+       as duas cópias são ligadas (par).
+    3. Percorrendo o sujeito, cada interseção alterna entre "entrada" (o
+       sujeito entra na janela) e "saída", a partir de o primeiro vértice
+       estar dentro ou fora.
+    4. Para cada entrada não visitada: segue o SUJEITO até a próxima
+       interseção (uma saída), troca para a JANELA e segue até a próxima
+       interseção (uma entrada), troca de novo... até voltar ao início.
+       Cada volta fechada é um polígono do resultado.
+
+    Casos degenerados (vértice exatamente sobre aresta, comuns em grade
+    inteira) são evitados deslocando a janela por um valor desprezível.
+    """
+    if len(sujeito) < 3 or len(janela) < 3:
+        return []
+    if area_com_sinal(sujeito) < 0:
+        sujeito = sujeito[::-1]
+    if area_com_sinal(janela) < 0:
+        janela = janela[::-1]
+
+    xs = [p[0] for p in sujeito + janela]
+    ys = [p[1] for p in sujeito + janela]
+    escala = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    eps = 1e-9 * escala
+    for tentativa in range(1, 6):
+        if not _degenerado(sujeito, janela, eps):
+            break
+        d = 1e-6 * escala * tentativa
+        janela = [(x + d, y + 0.618 * d) for x, y in janela]
+
+    # --- 2. listas com as interseções inseridas
+    lista_s = [[_No(*p)] for p in sujeito]     # por aresta: vértice + interseções
+    lista_j = [[_No(*p)] for p in janela]
+    extras_s = [[] for _ in sujeito]
+    extras_j = [[] for _ in janela]
+    ns, nj = len(sujeito), len(janela)
+    for i in range(ns):
+        a, b = sujeito[i], sujeito[(i + 1) % ns]
+        r = (b[0] - a[0], b[1] - a[1])
+        for k in range(nj):
+            c, d = janela[k], janela[(k + 1) % nj]
+            s_ = (d[0] - c[0], d[1] - c[1])
+            den = _vetorial(*r, *s_)
+            if den == 0:
+                continue                                    # paralelas
+            ac = (c[0] - a[0], c[1] - a[1])
+            t = _vetorial(*ac, *s_) / den                   # parâmetro na aresta do sujeito
+            u = _vetorial(*ac, *r) / den                    # parâmetro na aresta da janela
+            if 0 < t < 1 and 0 < u < 1:
+                x, y = a[0] + t * r[0], a[1] + t * r[1]
+                no_s, no_j = _No(x, y, True), _No(x, y, True)
+                no_s.par, no_j.par = no_j, no_s
+                extras_s[i].append((t, no_s))
+                extras_j[k].append((u, no_j))
+
+    for blocos, extras in ((lista_s, extras_s), (lista_j, extras_j)):
+        for bloco, ex in zip(blocos, extras):
+            bloco.extend(no for _, no in sorted(ex, key=lambda e: e[0]))
+    S = [no for bloco in lista_s for no in bloco]
+    J = [no for bloco in lista_j for no in bloco]
+
+    # --- sem interseções: um contém o outro, ou são disjuntos
+    if not any(no.intersecao for no in S):
+        if ponto_dentro(*sujeito[0], janela):
+            return [list(sujeito)]
+        if ponto_dentro(*janela[0], sujeito):
+            return [list(janela)]
+        return []
+
+    # --- 3. entrada / saída
+    dentro = ponto_dentro(S[0].x, S[0].y, janela)
+    for no in S:
+        if no.intersecao:
+            no.entrada = not dentro
+            dentro = not dentro
+    if rastro is not None:
+        rastro.extend((no.x, no.y, "entrada" if no.entrada else "saída")
+                      for no in S if no.intersecao)
+
+    # --- 4. percurso
+    pos = {id(no): i for i, no in enumerate(S)}
+    pos.update({id(no): i for i, no in enumerate(J)})
+    resultado = []
+    for inicio in S:
+        if not (inicio.intersecao and inicio.entrada and not inicio.visitado):
+            continue
+        poligono = []
+        lista, idx = S, pos[id(inicio)]
+        while True:
+            no = lista[idx]
+            no.visitado = no.par.visitado = True
+            poligono.append((no.x, no.y))
+            idx = (idx + 1) % len(lista)
+            while not lista[idx].intersecao:                # vértices até a próxima interseção
+                poligono.append((lista[idx].x, lista[idx].y))
+                idx = (idx + 1) % len(lista)
+            chegada = lista[idx]
+            if chegada is inicio or chegada.par is inicio:
+                break
+            lista = J if lista is S else S                  # troca de fronteira
+            idx = pos[id(chegada.par)]
+        resultado.append(poligono)
+    return resultado
+
+
 def exemplo_poligono():
     """Rastro do Sutherland–Hodgman (exemplo do relatório)."""
     janela = retangulo_para_poligono((10, 10, 30, 25))
@@ -253,6 +409,22 @@ def exemplo_poligono():
     for a, b, saida in r:
         pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in saida)
         print(f"  após aresta {a}->{b}: {len(saida)} vértices: {pts}")
+
+    # Polígono em U: o resultado correto são dois pedaços
+    janela = retangulo_para_poligono((0, 12, 30, 20))
+    sujeito = [(2, 0), (28, 0), (28, 24), (20, 24), (20, 8), (10, 8), (10, 24), (2, 24)]
+    print(f"\nPolígono em U contra a janela {janela}")
+    sh = sutherland_hodgman(sujeito, janela)
+    print(f"  Sutherland–Hodgman: 1 polígono com {len(sh)} vértices, "
+          f"pontes degeneradas: {pontes_degeneradas(sh)}")
+    r = []
+    wa = weiler_atherton(sujeito, janela, r)
+    print("  Weiler–Atherton: interseções ao longo do sujeito:")
+    for x, y, tipo in r:
+        print(f"    ({x:.1f}, {y:.1f}) {tipo}")
+    for i, p in enumerate(wa):
+        pts = ", ".join(f"({x:.1f}, {y:.1f})" for x, y in p)
+        print(f"  polígono {i + 1}: {pts}")
 
 
 def exemplo_rastro():
