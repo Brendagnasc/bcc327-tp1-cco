@@ -2,8 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 1: tubos iluminados por shader próprio (Gouraud em GLSL),
-MSAA ligável e câmera com matrizes próprias (transformacoes.py).
+TP2, versão 2: sombreamento Flat / Gouraud / Phong com shaders próprios
+(Blinn-Phong em GLSL), luz pontual móvel, MSAA e câmera com matrizes próprias.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -21,6 +21,10 @@ Teclas e mouse:
     R                      restaura transformações e vista
     M                      liga / desliga o antialiasing MSAA
     S                      salva a tela em report/figures/
+    G                      sombreamento: Flat / Gouraud / Phong
+    K                      componentes: ambiente / + difusa / + especular
+    L                      modo luz: setas e PageUp/PageDown movem a luz,
+                           + e - mudam a intensidade (L de novo volta ao normal)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -44,7 +48,7 @@ from OpenGL.GL import *
 import shaders
 import transformacoes as T
 from cores import mapear_cores
-from geometria import faixas_2d, tubos_3d
+from geometria import faixas_2d, normais_de_face, tubos_3d
 from leitor_vtk import ler_vtk
 
 LARGURA, ALTURA = 900, 900
@@ -53,6 +57,7 @@ VERMELHO = (0.8, 0.1, 0.1)
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
+LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -75,7 +80,12 @@ class Estado:
         self.msaa = False
         self.fbo_msaa = None            # framebuffer multiamostrado (criado em main)
         self.amostras_msaa = 0
-        self.vertices = self.cores = self.normais = None
+        self.vertices = self.cores = self.normais = self.normais_face = None
+        self.sombreamento = "Phong"
+        self.componentes = 2            # 0 ambiente, 1 + difusa, 2 + especular
+        self.modo_luz = False
+        self.luz = np.array(LUZ_PADRAO)  # posição da luz no espaço do MUNDO
+        self.intensidade = 1.0
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -87,6 +97,9 @@ class Estado:
         self.restaurar()
 
     def restaurar(self):
+        if hasattr(self, "luz"):
+            self.luz = np.array(LUZ_PADRAO)
+            self.intensidade = 1.0
         self.tx = self.ty = self.tz = 0.0
         self.ang_x = self.ang_y = self.ang_z = 0.0
         self.s = 1.0
@@ -127,7 +140,7 @@ class Estado:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
         raio = arv.raios * MM_PARA_M * self.exagero
-        self.normais = None
+        self.normais = self.normais_face = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
             self.cores = np.repeat(cores_seg, 2, axis=0)
@@ -138,6 +151,7 @@ class Estado:
             self.primitiva = GL_TRIANGLES
         else:                                 # 3D: tubos com normais para iluminação
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
+            self.normais_face = normais_de_face(self.vertices, self.normais)
             self.cores = cores_seg[seg_id]
             self.primitiva = GL_TRIANGLES
 
@@ -149,8 +163,9 @@ class Estado:
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
-            self.vbos = glGenBuffers(3)
-        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais)):
+            self.vbos = glGenBuffers(4)     # posição, cor, normal do vértice, normal da face
+        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
+                                          self.normais_face)):
             if dados is not None:
                 dados = np.ascontiguousarray(dados, dtype=np.float32)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -163,14 +178,22 @@ class Estado:
             aa = "MSAA indisponível"
         else:
             aa = f"MSAA {self.amostras_msaa}x ligado" if self.msaa else "MSAA desligado"
-        return (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
-                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x | {aa}")
+        texto = (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
+                 f"{MODOS[self.modo]} | {aa}")
+        if self.normais is not None:
+            texto += (f" | {self.sombreamento} | {COMPONENTES[self.componentes]} | "
+                      f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
+                      f"x{self.intensidade:.1f}")
+            if self.modo_luz:
+                texto += " | MODO LUZ"
+        return texto
 
 
 # -------------------------------------------------------------------- desenho
-LUZ_DIR = (0.4, 0.6, 1.0)   # direção para a luz, espaço da câmera ("lanterna")
-KA, KD = 0.35, 0.75         # coeficientes ambiente e difuso
-programa_gouraud = None     # criado em inicializar_gl(), quando já existe contexto
+# coeficientes do modelo de Blinn-Phong
+KA, KD, KS, BRILHO = 0.25, 0.75, 0.6, 40.0
+COMPONENTES = ["só ambiente", "ambiente + difusa", "ambiente + difusa + especular"]
+programas = {}              # criados em inicializar_gl(), quando já existe contexto
 
 
 def desenhar_arvore(estado):
@@ -195,19 +218,30 @@ def desenhar_arvore(estado):
 
 
 def desenhar_com_shader(estado, modelview):
-    """Tubos: as matrizes do grupo vão como uniforms e a iluminação é
-    calculada pelo nosso shader, sem o pipeline fixo."""
-    prog = programa_gouraud
+    """Tubos: as matrizes do grupo e a luz vão como uniforms e a iluminação
+    é calculada pelos nossos shaders, sem o pipeline fixo."""
+    prog = programas[estado.sombreamento]
     prog.usar()
     prog.mat4("u_projecao", estado.matriz_projecao())
     prog.mat4("u_modelview", modelview)
     prog.mat3("u_normal", shaders.matriz_normal(modelview))
-    prog.vec3("u_luz_dir", LUZ_DIR)
+
+    # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
+    luz_camera = estado.matriz_visao() @ np.append(estado.luz, 1.0)
+    prog.vec3("u_luz_pos", luz_camera[:3])
+    prog.float("u_intensidade", estado.intensidade)
     prog.float("u_ka", KA)
     prog.float("u_kd", KD)
+    prog.float("u_ks", KS)
+    prog.float("u_brilho", BRILHO)
+    prog.float("u_usar_difusa", 1.0 if estado.componentes >= 1 else 0.0)
+    prog.float("u_usar_especular", 1.0 if estado.componentes >= 2 else 0.0)
 
-    # cada VBO alimenta um atributo do vertex shader (layout location 0, 1, 2)
-    for local, vbo in enumerate(estado.vbos):
+    # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
+    # recebe as normais de FACE em vez das normais dos vértices.
+    vbo_v, vbo_c, vbo_n, vbo_nf = estado.vbos
+    vbo_normal = vbo_nf if estado.sombreamento == "Flat" else vbo_n
+    for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
         glEnableVertexAttribArray(local)
         glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
@@ -216,6 +250,17 @@ def desenhar_com_shader(estado, modelview):
         glDisableVertexAttribArray(local)
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glUseProgram(0)
+
+
+def desenhar_luz(estado):
+    """Marcador amarelo na posição da luz (só a matriz de visão: a luz é do mundo)."""
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(14.0 if estado.modo_luz else 9.0)
+    glBegin(GL_POINTS)
+    glColor3f(1.0, 0.8, 0.0)
+    glVertex3f(*estado.luz)
+    glEnd()
 
 
 def desenhar_eixos(estado):
@@ -310,6 +355,8 @@ def desenhar_quadro(estado, fonte):
     if estado.eixos:
         desenhar_eixos(estado)
     desenhar_arvore(estado)
+    if estado.normais is not None:
+        desenhar_luz(estado)
 
     if usar_msaa:                              # resolve: média das amostras -> janela
         glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
@@ -325,9 +372,36 @@ def desenhar_quadro(estado, fonte):
 
 
 # -------------------------------------------------------------------- entrada
+def tratar_tecla_luz(estado, tecla):
+    """No modo luz, setas e PageUp/PageDown movem a fonte e + / - mudam a intensidade."""
+    passo = 0.2
+    movimentos = {pygame.K_LEFT: (-passo, 0, 0), pygame.K_RIGHT: (passo, 0, 0),
+                  pygame.K_UP: (0, passo, 0), pygame.K_DOWN: (0, -passo, 0),
+                  pygame.K_PAGEUP: (0, 0, passo), pygame.K_PAGEDOWN: (0, 0, -passo)}
+    if tecla in movimentos:
+        estado.luz = estado.luz + np.array(movimentos[tecla])
+        return True
+    if tecla in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+        estado.intensidade = min(estado.intensidade + 0.1, 2.0)
+        return True
+    if tecla in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        estado.intensidade = max(estado.intensidade - 0.1, 0.0)
+        return True
+    return False
+
+
 def tratar_tecla(estado, tecla):
     passo = 0.05
-    if tecla == pygame.K_e:
+    if estado.modo_luz and tratar_tecla_luz(estado, tecla):
+        return
+    if tecla == pygame.K_g:
+        nomes = list(shaders.FONTES)
+        estado.sombreamento = nomes[(nomes.index(estado.sombreamento) + 1) % len(nomes)]
+    elif tecla == pygame.K_k:
+        estado.componentes = (estado.componentes + 1) % len(COMPONENTES)
+    elif tecla == pygame.K_l:
+        estado.modo_luz = not estado.modo_luz
+    elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
     elif tecla == pygame.K_c:
@@ -377,8 +451,7 @@ def inicializar_gl():
     glLineWidth(2.0)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    global programa_gouraud
-    programa_gouraud = shaders.Programa(shaders.GOURAUD_VERT, shaders.GOURAUD_FRAG)
+    programas.update(shaders.criar_programas())
     print("OpenGL:", glGetString(GL_VERSION).decode(),
           "| GLSL:", glGetString(GL_SHADING_LANGUAGE_VERSION).decode())
 
@@ -404,7 +477,7 @@ def nome_captura(estado):
 
 
 def main():
-    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree2D_Nterm064.vtk"
+    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree3D_Nterm064.vtk"
     arvore = ler_vtk(caminho)
 
     pygame.display.init()             # só vídeo e fonte (evita iniciar o áudio)
@@ -416,6 +489,7 @@ def main():
     inicializar_gl()
 
     estado = Estado(arvore)
+    estado.modo = 1 if arvore.eh_3d else 0          # TP2: modelos 3D abrem em tubos
     estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
     estado.reconstruir()
 
