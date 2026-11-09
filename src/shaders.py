@@ -5,9 +5,14 @@ Programas de shader (GLSL) escritos pelo grupo e utilitários para compilá-los.
 
 O pipeline programável substitui a iluminação fixa do OpenGL: as equações
 de iluminação passam a ser código nosso, executado na GPU.
-    vertex shader:   roda uma vez por VÉRTICE (posição na tela e, no
-                     Gouraud, também a cor iluminada)
+    vertex shader:   roda uma vez por VÉRTICE
     fragment shader: roda uma vez por PIXEL coberto pelo triângulo
+
+Os três modelos de sombreamento usam a MESMA equação de iluminação
+(Blinn-Phong); o que muda é ONDE ela é avaliada:
+    Flat:    uma vez por triângulo, com a normal da face
+    Gouraud: uma vez por vértice; as cores são interpoladas
+    Phong:   uma vez por pixel; as NORMAIS são interpoladas
 
 Convenção de atributos (layout location):
     0 = posição (x, y, z)    1 = cor (r, g, b)    2 = normal (nx, ny, nz)
@@ -16,45 +21,112 @@ Convenção de atributos (layout location):
 import numpy as np
 from OpenGL.GL import *
 
-# ---------------------------------------------------------------- Gouraud
-# A iluminação é calculada no vertex shader (por vértice); o rasterizador
-# interpola as CORES resultantes ao longo do triângulo.
-GOURAUD_VERT = """
+# ---------------------------------------------------------------- iluminação
+# Modelo de Blinn-Phong com uma luz pontual, tudo no espaço da câmera
+# (a câmera está na origem, então a direção para o observador é -pos).
+#   I = ka*cor + intensidade * (kd*cor*max(N.L, 0) + ks*max(N.H, 0)^brilho)
+#   L = direção do ponto para a luz,  V = direção do ponto para a câmera
+#   H = (L + V) normalizado: vetor intermediário (half vector)
+ILUMINACAO = """
+uniform vec3  u_luz_pos;        // posição da luz no espaço da câmera
+uniform float u_intensidade;    // intensidade da fonte
+uniform float u_ka;             // coeficiente ambiente
+uniform float u_kd;             // coeficiente difuso
+uniform float u_ks;             // coeficiente especular
+uniform float u_brilho;         // expoente especular (quanto maior, menor o brilho)
+uniform float u_usar_difusa;    // 1.0 liga, 0.0 desliga (para demonstração)
+uniform float u_usar_especular;
+
+vec3 iluminar(vec3 N, vec3 pos, vec3 cor) {
+    N = normalize(N);
+    vec3 L = normalize(u_luz_pos - pos);
+    vec3 V = normalize(-pos);
+    vec3 H = normalize(L + V);
+
+    vec3 ambiente  = u_ka * cor;
+    vec3 difusa    = u_kd * cor * max(dot(N, L), 0.0);
+    float lado     = dot(N, L) > 0.0 ? 1.0 : 0.0;     // sem brilho no lado escuro
+    vec3 especular = u_ks * vec3(1.0) * pow(max(dot(N, H), 0.0), u_brilho) * lado;
+
+    return ambiente + u_intensidade * (u_usar_difusa * difusa + u_usar_especular * especular);
+}
+"""
+
+CABECALHO_VERT = """
 #version 330 core
 layout(location = 0) in vec3 a_posicao;
 layout(location = 1) in vec3 a_cor;
 layout(location = 2) in vec3 a_normal;
-
 uniform mat4 u_projecao;     // P
 uniform mat4 u_modelview;    // V . M
 uniform mat3 u_normal;       // transposta da inversa de (V . M) 3x3
-uniform vec3 u_luz_dir;      // direção PARA a luz, no espaço da câmera
-uniform float u_ka;          // coeficiente ambiente
-uniform float u_kd;          // coeficiente difuso
-
-out vec3 v_cor;
-
-void main() {
-    vec4 pos_camera = u_modelview * vec4(a_posicao, 1.0);
-    gl_Position = u_projecao * pos_camera;
-
-    vec3 N = normalize(u_normal * a_normal);
-    vec3 L = normalize(u_luz_dir);
-    float difusa = max(dot(N, L), 0.0);      // Lambert: cosseno entre N e L
-
-    v_cor = a_cor * (u_ka + u_kd * difusa);
-}
 """
 
+# ---------------------------------------------------------------- Flat
+# A normal recebida é a da FACE (igual nos 3 vértices). O qualificador
+# 'flat' desliga a interpolação: o triângulo inteiro usa a cor de um vértice.
+FLAT_VERT = CABECALHO_VERT + ILUMINACAO + """
+flat out vec3 v_cor;
+void main() {
+    vec4 pos = u_modelview * vec4(a_posicao, 1.0);
+    gl_Position = u_projecao * pos;
+    v_cor = iluminar(u_normal * a_normal, pos.xyz, a_cor);
+}
+"""
+FLAT_FRAG = """
+#version 330 core
+flat in vec3 v_cor;
+out vec4 f_cor;
+void main() { f_cor = vec4(v_cor, 1.0); }
+"""
+
+# ---------------------------------------------------------------- Gouraud
+# Iluminação por VÉRTICE; o rasterizador interpola as CORES.
+GOURAUD_VERT = CABECALHO_VERT + ILUMINACAO + """
+out vec3 v_cor;
+void main() {
+    vec4 pos = u_modelview * vec4(a_posicao, 1.0);
+    gl_Position = u_projecao * pos;
+    v_cor = iluminar(u_normal * a_normal, pos.xyz, a_cor);
+}
+"""
 GOURAUD_FRAG = """
 #version 330 core
-in vec3 v_cor;               // já interpolada entre os 3 vértices
+in vec3 v_cor;
 out vec4 f_cor;
+void main() { f_cor = vec4(v_cor, 1.0); }
+"""
 
+# ---------------------------------------------------------------- Phong
+# O vertex shader só repassa posição e normal; o rasterizador interpola
+# as NORMAIS e a iluminação é feita por PIXEL no fragment shader.
+PHONG_VERT = CABECALHO_VERT + """
+out vec3 v_pos;
+out vec3 v_normal;
+out vec3 v_cor;
 void main() {
-    f_cor = vec4(v_cor, 1.0);
+    vec4 pos = u_modelview * vec4(a_posicao, 1.0);
+    gl_Position = u_projecao * pos;
+    v_pos = pos.xyz;
+    v_normal = u_normal * a_normal;
+    v_cor = a_cor;
 }
 """
+PHONG_FRAG = """
+#version 330 core
+in vec3 v_pos;
+in vec3 v_normal;            // interpolada: precisa ser renormalizada
+in vec3 v_cor;
+out vec4 f_cor;
+""" + ILUMINACAO + """
+void main() { f_cor = vec4(iluminar(v_normal, v_pos, v_cor), 1.0); }
+"""
+
+FONTES = {
+    "Flat": (FLAT_VERT, FLAT_FRAG),
+    "Gouraud": (GOURAUD_VERT, GOURAUD_FRAG),
+    "Phong": (PHONG_VERT, PHONG_FRAG),
+}
 
 
 def _compilar(fonte, tipo):
@@ -106,6 +178,11 @@ class Programa:
 
     def float(self, nome, x):
         glUniform1f(self._local(nome), float(x))
+
+
+def criar_programas():
+    """Compila os três modelos de sombreamento (chamar com contexto OpenGL ativo)."""
+    return {nome: Programa(v, f) for nome, (v, f) in FONTES.items()}
 
 
 def matriz_normal(modelview):
