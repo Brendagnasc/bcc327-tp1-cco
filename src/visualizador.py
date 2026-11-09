@@ -2,8 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 5: MSAA ligável (antialiasing da API), tubos 3D com espessura
-proporcional ao raio e câmera com matrizes próprias (transformacoes.py).
+TP2, versão 1: tubos iluminados por shader próprio (Gouraud em GLSL),
+MSAA ligável e câmera com matrizes próprias (transformacoes.py).
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -41,6 +41,7 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import shaders
 import transformacoes as T
 from cores import mapear_cores
 from geometria import faixas_2d, tubos_3d
@@ -167,18 +168,20 @@ class Estado:
 
 
 # -------------------------------------------------------------------- desenho
+LUZ_DIR = (0.4, 0.6, 1.0)   # direção para a luz, espaço da câmera ("lanterna")
+KA, KD = 0.35, 0.75         # coeficientes ambiente e difuso
+programa_gouraud = None     # criado em inicializar_gl(), quando já existe contexto
+
+
 def desenhar_arvore(estado):
+    modelview = estado.matriz_visao() @ estado.matriz_modelo()
+    if estado.normais is not None:
+        desenhar_com_shader(estado, modelview)
+        return
+
     glMatrixMode(GL_MODELVIEW)
-    glLoadMatrixf(T.para_opengl(estado.matriz_visao() @ estado.matriz_modelo()))
-
-    vbo_v, vbo_c, vbo_n = estado.vbos
-    iluminar = estado.normais is not None
-    if iluminar:
-        glEnable(GL_LIGHTING)
-        glEnableClientState(GL_NORMAL_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_n)
-        glNormalPointer(GL_FLOAT, 0, None)     # None = começa no início do buffer
-
+    glLoadMatrixf(T.para_opengl(modelview))
+    vbo_v, vbo_c, _ = estado.vbos
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_v)
@@ -190,21 +193,29 @@ def desenhar_arvore(estado):
     glDisableClientState(GL_COLOR_ARRAY)
     glDisableClientState(GL_VERTEX_ARRAY)
 
-    if iluminar:
-        glDisableClientState(GL_NORMAL_ARRAY)
-        glDisable(GL_LIGHTING)
 
+def desenhar_com_shader(estado, modelview):
+    """Tubos: as matrizes do grupo vão como uniforms e a iluminação é
+    calculada pelo nosso shader, sem o pipeline fixo."""
+    prog = programa_gouraud
+    prog.usar()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", modelview)
+    prog.mat3("u_normal", shaders.matriz_normal(modelview))
+    prog.vec3("u_luz_dir", LUZ_DIR)
+    prog.float("u_ka", KA)
+    prog.float("u_kd", KD)
 
-def configurar_iluminacao():
-    """Iluminação da API (OpenGL fixo), usada só para dar volume aos tubos.
-    Uma luz direcional + luz ambiente; o estudo de iluminação é tema do TP2."""
-    glEnable(GL_LIGHT0)
-    glLightfv(GL_LIGHT0, GL_AMBIENT, (0.5, 0.5, 0.5, 1.0))
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.6, 0.6, 0.6, 1.0))
-    glEnable(GL_COLOR_MATERIAL)                     # a cor do vértice vira o material
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-    glEnable(GL_NORMALIZE)                          # a matriz M tem escala: renormaliza
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
+    # cada VBO alimenta um atributo do vertex shader (layout location 0, 1, 2)
+    for local, vbo in enumerate(estado.vbos):
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
+    glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+    for local in range(3):
+        glDisableVertexAttribArray(local)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glUseProgram(0)
 
 
 def desenhar_eixos(estado):
@@ -296,10 +307,6 @@ def desenhar_quadro(estado, fonte):
     glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
     glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
 
-    # Luz definida com a modelview identidade: fica presa à câmera ("lanterna")
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-    glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.6, 1.0, 0.0))
     if estado.eixos:
         desenhar_eixos(estado)
     desenhar_arvore(estado)
@@ -370,7 +377,10 @@ def inicializar_gl():
     glLineWidth(2.0)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    configurar_iluminacao()
+    global programa_gouraud
+    programa_gouraud = shaders.Programa(shaders.GOURAUD_VERT, shaders.GOURAUD_FRAG)
+    print("OpenGL:", glGetString(GL_VERSION).decode(),
+          "| GLSL:", glGetString(GL_SHADING_LANGUAGE_VERSION).decode())
 
 
 def capturar(caminho):
