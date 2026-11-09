@@ -142,3 +142,19 @@ def tubos_3d(pontos, segmentos, raio, n_lados=12):
     normais = np.concatenate([tubo_n, esf_n]).astype(np.float32)
     seg_id = np.concatenate([tubo_id, esf_id])
     return vertices, normais, seg_id
+
+
+def normais_de_face(vertices, normais_vertice):
+    """Uma normal por triângulo (para o sombreamento Flat), repetida nos 3 vértices.
+
+    A normal da face é o produto vetorial de duas arestas, (B - A) x (C - A).
+    O sentido depende da ordem dos vértices; para garantir que aponte para
+    fora, ela é invertida quando discorda da média das normais dos vértices.
+    """
+    tri = vertices.reshape(-1, 3, 3)
+    face = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    comp = np.linalg.norm(face, axis=1, keepdims=True)
+    face = face / np.where(comp == 0, 1, comp)
+    media = normais_vertice.reshape(-1, 3, 3).mean(axis=1)
+    sinal = np.where((face * media).sum(axis=1, keepdims=True) < 0, -1.0, 1.0)
+    return np.repeat(face * sinal, 3, axis=0).astype(np.float32)
