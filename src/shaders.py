@@ -73,11 +73,21 @@ void main() {
     v_cor = iluminar(u_normal * a_normal, pos.xyz, a_cor);
 }
 """
+# Destaque de faces de trás: gl_FrontFacing é decidido pelo rasterizador a
+# partir da ORDEM dos vértices na tela (anti-horário = frente).
+DESTAQUE = """
+uniform float u_destacar_tras;
+vec4 destacar(vec4 cor) {
+    return (u_destacar_tras > 0.5 && !gl_FrontFacing) ? vec4(0.9, 0.1, 0.1, 1.0) : cor;
+}
+"""
+
 FLAT_FRAG = """
 #version 330 core
 flat in vec3 v_cor;
 out vec4 f_cor;
-void main() { f_cor = vec4(v_cor, 1.0); }
+""" + DESTAQUE + """
+void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
 """
 
 # ---------------------------------------------------------------- Gouraud
@@ -94,7 +104,8 @@ GOURAUD_FRAG = """
 #version 330 core
 in vec3 v_cor;
 out vec4 f_cor;
-void main() { f_cor = vec4(v_cor, 1.0); }
+""" + DESTAQUE + """
+void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
 """
 
 # ---------------------------------------------------------------- Phong
@@ -118,8 +129,8 @@ in vec3 v_pos;
 in vec3 v_normal;            // interpolada: precisa ser renormalizada
 in vec3 v_cor;
 out vec4 f_cor;
-""" + ILUMINACAO + """
-void main() { f_cor = vec4(iluminar(v_normal, v_pos, v_cor), 1.0); }
+""" + ILUMINACAO + DESTAQUE + """
+void main() { f_cor = destacar(vec4(iluminar(v_normal, v_pos, v_cor), 1.0)); }
 """
 
 FONTES = {
