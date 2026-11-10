@@ -2,8 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 2: sombreamento Flat / Gouraud / Phong com shaders próprios
-(Blinn-Phong em GLSL), luz pontual móvel, MSAA e câmera com matrizes próprias.
+TP2, versão 3: remoção de superfícies escondidas (Back-Face Culling próprio
+e do OpenGL, Z-Buffer com visualização da profundidade), sombreamento
+Flat / Gouraud / Phong com shaders próprios e luz pontual móvel.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -25,6 +26,10 @@ Teclas e mouse:
     K                      componentes: ambiente / + difusa / + especular
     L                      modo luz: setas e PageUp/PageDown movem a luz,
                            + e - mudam a intensidade (L de novo volta ao normal)
+    B                      Back-Face Culling: desligado / OpenGL / próprio (N . V)
+    D                      liga / desliga o Z-Buffer (teste de profundidade)
+    V                      mostra o conteúdo do Z-Buffer em tons de cinza
+    F                      pinta de vermelho as faces de trás
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -58,6 +63,8 @@ MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
 LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
+PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
+CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -86,6 +93,11 @@ class Estado:
         self.modo_luz = False
         self.luz = np.array(LUZ_PADRAO)  # posição da luz no espaço do MUNDO
         self.intensidade = 1.0
+        self.culling = 0
+        self.zbuffer = True
+        self.ver_profundidade = False
+        self.destacar_tras = False
+        self.tri_desenhados = 0
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -125,11 +137,11 @@ class Estado:
     def matriz_projecao(self):
         aspecto = LARGURA / ALTURA
         if self.perspectiva:
-            return T.perspectiva(FOVY, aspecto, 0.01, 100.0)
+            return T.perspectiva(FOVY, aspecto, PERTO, LONGE)
         # Caixa ortográfica com a mesma altura que o frustum tem no alvo,
         # para o modelo não "pular" de tamanho ao trocar de projeção
         h = self.dist * np.tan(np.radians(FOVY) / 2)
-        return T.ortografica(-h * aspecto, h * aspecto, -h, h, 0.01, 100.0)
+        return T.ortografica(-h * aspecto, h * aspecto, -h, h, PERTO, LONGE)
 
     # ---------------------------------------------------------------- geometria
     def reconstruir(self):
@@ -153,6 +165,9 @@ class Estado:
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
             self.normais_face = normais_de_face(self.vertices, self.normais)
             self.cores = cores_seg[seg_id]
+            # dados por triângulo para o culling próprio: normal e centroide
+            self.tri_normal = self.normais_face[::3].astype(float)
+            self.tri_centro = self.vertices.reshape(-1, 3, 3).mean(axis=1).astype(float)
             self.primitiva = GL_TRIANGLES
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
@@ -164,6 +179,7 @@ class Estado:
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
             self.vbos = glGenBuffers(4)     # posição, cor, normal do vértice, normal da face
+            self.ebo = glGenBuffers(1)      # índices dos triângulos visíveis (culling próprio)
         for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
                                           self.normais_face)):
             if dados is not None:
@@ -181,7 +197,10 @@ class Estado:
         texto = (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
                  f"{MODOS[self.modo]} | {aa}")
         if self.normais is not None:
-            texto += (f" | {self.sombreamento} | {COMPONENTES[self.componentes]} | "
+            total = len(self.vertices) // 3
+            texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
+                      f"triângulos | Z-Buffer {'ligado' if self.zbuffer else 'desligado'}")
+            texto += (f"\n{self.sombreamento} | {COMPONENTES[self.componentes]} | "
                       f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
                       f"x{self.intensidade:.1f}")
             if self.modo_luz:
@@ -239,17 +258,58 @@ def desenhar_com_shader(estado, modelview):
 
     # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
     # recebe as normais de FACE em vez das normais dos vértices.
+    prog.float("u_destacar_tras", 1.0 if estado.destacar_tras else 0.0)
+
     vbo_v, vbo_c, vbo_n, vbo_nf = estado.vbos
     vbo_normal = vbo_nf if estado.sombreamento == "Flat" else vbo_n
     for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
         glEnableVertexAttribArray(local)
         glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
-    glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+
+    total = len(estado.vertices) // 3
+    modo = CULLING[estado.culling]
+    if modo == "próprio (N·V)":
+        # desenha só os triângulos que passaram no teste N . V > 0
+        visiveis = triangulos_de_frente(estado, modelview)
+        indices = (visiveis[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        estado.tri_desenhados = len(visiveis)
+    else:
+        if modo == "OpenGL":
+            # o OpenGL decide pela ORDEM dos vértices já projetados na tela:
+            # anti-horário = frente (glFrontFace), horário = trás (descartada)
+            glEnable(GL_CULL_FACE)
+            glFrontFace(GL_CCW)
+            glCullFace(GL_BACK)
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+        glDisable(GL_CULL_FACE)
+        estado.tri_desenhados = total     # o OpenGL não informa quantos descartou
+
     for local in range(3):
         glDisableVertexAttribArray(local)
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glUseProgram(0)
+
+
+def triangulos_de_frente(estado, modelview):
+    """Back-Face Culling próprio: índices dos triângulos com N . V > 0.
+
+    No espaço da câmera, N é a normal da face e V aponta do triângulo para
+    o observador. Na perspectiva o observador está na origem, então
+    V = -centroide; na ortográfica todos os raios são paralelos a +z,
+    então V = (0, 0, 1). Se N . V <= 0, a face está de costas e é descartada.
+    """
+    normais = estado.tri_normal @ shaders.matriz_normal(modelview).T
+    if estado.perspectiva:
+        centros = estado.tri_centro @ modelview[:3, :3].T + modelview[:3, 3]
+        n_dot_v = -(normais * centros).sum(axis=1)
+    else:
+        n_dot_v = normais[:, 2]
+    return np.nonzero(n_dot_v > 0)[0]
 
 
 def desenhar_luz(estado):
@@ -342,13 +402,44 @@ def criar_fbo_msaa(amostras=4):
         return None, 0
 
 
+def mostrar_profundidade(estado):
+    """Lê o Z-Buffer e desenha a profundidade em tons de cinza (perto = escuro).
+
+    O buffer guarda d em [0, 1], que NÃO é linear na distância quando a
+    projeção é perspectiva. A conversão para a distância z da câmera é a
+    inversa da projeção:  z = 2 n f / ((f + n) - (2d - 1)(f - n)).
+    """
+    glPixelStorei(GL_PACK_ALIGNMENT, 1)
+    d = np.frombuffer(glReadPixels(0, 0, LARGURA, ALTURA, GL_DEPTH_COMPONENT, GL_FLOAT),
+                      dtype=np.float32).reshape(ALTURA, LARGURA).astype(float)
+    fundo = d >= 1.0
+    if estado.perspectiva:
+        z = 2 * PERTO * LONGE / ((LONGE + PERTO) - (2 * d - 1) * (LONGE - PERTO))
+    else:
+        z = PERTO + d * (LONGE - PERTO)
+    cinza = np.full_like(z, 255.0)
+    if (~fundo).any():
+        zmin, zmax = z[~fundo].min(), z[~fundo].max()
+        cinza[~fundo] = 20 + 200 * (z[~fundo] - zmin) / max(zmax - zmin, 1e-9)
+    img = np.repeat(cinza[:, :, None], 3, axis=2).astype(np.uint8)
+    glClear(GL_COLOR_BUFFER_BIT)
+    glWindowPos2d(0, 0)
+    glDrawPixels(LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(img))
+
+
 def desenhar_quadro(estado, fonte):
-    usar_msaa = estado.msaa and estado.fbo_msaa is not None
+    # o Z-Buffer é lido da janela; o FBO multiamostrado não pode ser lido direto
+    usar_msaa = estado.msaa and estado.fbo_msaa is not None and not estado.ver_profundidade
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
         glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-    glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
+    # Z-Buffer: cada fragmento só é escrito se estiver mais perto que o já gravado
+    if estado.zbuffer:
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+    else:
+        glDisable(GL_DEPTH_TEST)               # vale o último desenhado (ordem do VBO)
     glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
     glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
 
@@ -365,10 +456,14 @@ def desenhar_quadro(estado, fonte):
                           GL_COLOR_BUFFER_BIT, GL_NEAREST)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+    if estado.ver_profundidade:
+        mostrar_profundidade(estado)
+
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
     if estado.modo != 2:
         desenhar_barra_cores(estado, fonte)
-    desenhar_texto(fonte, estado.descricao(), 10, 10)
+    for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
+        desenhar_texto(fonte, linha, 10, 10 + 22 * i)
 
 
 # -------------------------------------------------------------------- entrada
@@ -401,6 +496,14 @@ def tratar_tecla(estado, tecla):
         estado.componentes = (estado.componentes + 1) % len(COMPONENTES)
     elif tecla == pygame.K_l:
         estado.modo_luz = not estado.modo_luz
+    elif tecla == pygame.K_b:
+        estado.culling = (estado.culling + 1) % len(CULLING)
+    elif tecla == pygame.K_d:
+        estado.zbuffer = not estado.zbuffer
+    elif tecla == pygame.K_v:
+        estado.ver_profundidade = not estado.ver_profundidade
+    elif tecla == pygame.K_f:
+        estado.destacar_tras = not estado.destacar_tras
     elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
