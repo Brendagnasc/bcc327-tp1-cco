@@ -2,15 +2,17 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 5: plano de referência com textura (NEAREST, bilinear do OpenGL
-e bilinear própria), transparência com Painter's Algorithm, Back-Face
-Culling, Z-Buffer, sombreamento Flat / Gouraud / Phong e luz pontual móvel.
+TP2, versão 6: seleção de vasos por Ray Casting (clique direito), plano
+com textura, transparência com Painter's Algorithm, Back-Face Culling,
+Z-Buffer, sombreamento Flat / Gouraud / Phong e luz pontual móvel.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
 
 Teclas e mouse:
     arrastar (botão esq.)  rotação em torno de x e y
+    clique direito         seleciona o vaso sob o cursor (Ray Casting);
+                           em área vazia, desfaz a seleção
     roda do mouse          zoom (aproxima / afasta a câmera)
     Z / X                  rotação em torno de z
     setas                  translação em x e y
@@ -54,6 +56,7 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import raycasting
 import shaders
 import transformacoes as T
 from textura import PlanoTexturizado
@@ -64,6 +67,7 @@ from leitor_vtk import ler_vtk
 LARGURA, ALTURA = 900, 900
 FUNDO = (1.0, 1.0, 1.0)
 VERMELHO = (0.8, 0.1, 0.1)
+COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
@@ -110,6 +114,9 @@ class Estado:
         self.ordem = 0
         self.plano = True
         self.filtro = 1
+        self.selecionado = None         # índice do vaso escolhido por Ray Casting
+        self.t_selecao = None
+        self.ponto_selecao = None       # ponto de impacto no espaço do mundo
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -167,7 +174,8 @@ class Estado:
         self.normais = self.normais_face = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
-            self.cores = np.repeat(cores_seg, 2, axis=0)
+            seg_id = np.repeat(np.arange(arv.n_segmentos), 2)
+            self.cores = cores_seg[seg_id]
             self.primitiva = GL_LINES
         elif not arv.eh_3d:                   # 2D: faixas planas
             self.vertices, seg_id = faixas_2d(arv.pontos, arv.segmentos, raio)
@@ -183,8 +191,45 @@ class Estado:
             self.primitiva = GL_TRIANGLES
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
-        self.cores = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.seg_id = seg_id                         # de qual vaso é cada vértice
+        self.cores_base = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.cores = self.cores_com_selecao()
         self.enviar_para_gpu()
+
+    # ---------------------------------------------------------------- seleção
+    def cores_com_selecao(self):
+        cores = self.cores_base.copy()
+        if self.selecionado is not None:
+            cores[self.seg_id == self.selecionado] = COR_SELECAO
+        return cores
+
+    def selecionar(self, px, py):
+        """Ray Casting: raio pelo pixel clicado e primeiro vaso atingido."""
+        arv = self.arvore
+        visao, modelo = self.matriz_visao(), self.matriz_modelo()
+        O, D = raycasting.raio_do_pixel(px, py, LARGURA, ALTURA, self.matriz_projecao(), visao)
+        Om, Dm = raycasting.para_modelo(O, D, modelo)
+        raio = arv.raios * MM_PARA_M * self.exagero        # mesma espessura dos tubos
+        self.selecionado, self.t_selecao = raycasting.escolher_vaso(
+            Om, Dm, arv.pontos, arv.segmentos, raio)
+        self.ponto_selecao = None if self.t_selecao is None else O + self.t_selecao * D
+        # só a cor muda: reenvia apenas o VBO de cores
+        self.cores = self.cores_com_selecao()
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbos[1])
+        glBufferData(GL_ARRAY_BUFFER, self.cores.nbytes, self.cores, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        print(f"raio O = {np.round(O, 3)}  D = {np.round(D / np.linalg.norm(D), 3)}  ->  "
+              + ("nenhum vaso" if self.selecionado is None else
+                 f"vaso {self.selecionado}, t = {self.t_selecao:.4f}"))
+
+    def info_selecao(self):
+        if self.selecionado is None:
+            return None
+        arv = self.arvore
+        a, b = arv.pontos[arv.segmentos[self.selecionado]]
+        comprimento = np.linalg.norm(b - a) / MM_PARA_M
+        return (f"vaso {self.selecionado} | raio {arv.raios[self.selecionado]:.3f} mm | "
+                f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}").replace(".", ",")
 
     def enviar_para_gpu(self):
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
@@ -384,6 +429,19 @@ def desenhar_plano(estado):
     glUseProgram(0)
 
 
+def desenhar_impacto(estado):
+    """Marca o ponto onde o raio de seleção atingiu o vaso."""
+    if estado.ponto_selecao is None:
+        return
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(8.0)
+    glBegin(GL_POINTS)
+    glColor3f(0.0, 0.0, 0.0)
+    glVertex3f(*estado.ponto_selecao)
+    glEnd()
+
+
 def desenhar_luz(estado):
     """Marcador amarelo na posição da luz (só a matriz de visão: a luz é do mundo)."""
     glMatrixMode(GL_MODELVIEW)
@@ -410,9 +468,9 @@ def desenhar_eixos(estado):
     glLineWidth(2.0)
 
 
-def desenhar_texto(fonte, texto, x, y):
+def desenhar_texto(fonte, texto, x, y, fundo=None):
     """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
-    superficie = fonte.render(texto, True, (20, 20, 20))
+    superficie = fonte.render(texto, True, (20, 20, 20), fundo)
     dados = pygame.image.tobytes(superficie, "RGBA", True)
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
@@ -522,6 +580,7 @@ def desenhar_quadro(estado, fonte):
     desenhar_arvore(estado)
     if estado.normais is not None:
         desenhar_luz(estado)
+    desenhar_impacto(estado)
 
     if usar_msaa:                              # resolve: média das amostras -> janela
         glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
@@ -538,6 +597,9 @@ def desenhar_quadro(estado, fonte):
         desenhar_barra_cores(estado, fonte)
     for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
         desenhar_texto(fonte, linha, 10, 10 + 22 * i)
+    info = estado.info_selecao()
+    if info:                                  # painel do vaso selecionado, no topo
+        desenhar_texto(fonte, " selecionado: " + info + " ", 10, ALTURA - 92, (255, 255, 255))
 
 
 # -------------------------------------------------------------------- entrada
@@ -694,6 +756,8 @@ def main():
                     salvar = True
                 else:
                     tratar_tecla(estado, evento.key)
+            elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
+                estado.selecionar(*evento.pos)
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
                 estado.ang_y += evento.rel[0] * 0.5
                 estado.ang_x += evento.rel[1] * 0.5
