@@ -75,10 +75,15 @@ void main() {
 """
 # Destaque de faces de trás: gl_FrontFacing é decidido pelo rasterizador a
 # partir da ORDEM dos vértices na tela (anti-horário = frente).
+#
+# Transparência: a cor sai com alfa = u_alfa e o OpenGL compõe com o que já
+# está no framebuffer (alpha blending):  C = alfa*C_novo + (1 - alfa)*C_antigo
 DESTAQUE = """
 uniform float u_destacar_tras;
+uniform float u_alfa;            // opacidade: 1 = opaco, 0 = invisível
 vec4 destacar(vec4 cor) {
-    return (u_destacar_tras > 0.5 && !gl_FrontFacing) ? vec4(0.9, 0.1, 0.1, 1.0) : cor;
+    vec4 saida = (u_destacar_tras > 0.5 && !gl_FrontFacing) ? vec4(0.9, 0.1, 0.1, 1.0) : cor;
+    return vec4(saida.rgb, u_alfa);
 }
 """
 
