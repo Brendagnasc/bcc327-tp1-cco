@@ -144,6 +144,62 @@ FONTES = {
     "Phong": (PHONG_VERT, PHONG_FRAG),
 }
 
+# ---------------------------------------------------------------- Textura
+# Plano de referência: o vertex shader repassa (u, v); o rasterizador as
+# interpola; o fragment shader busca a cor da textura nesse ponto e a ilumina.
+TEXTURA_VERT = """
+#version 330 core
+layout(location = 0) in vec3 a_posicao;
+layout(location = 1) in vec2 a_uv;          // coordenadas de textura do vértice
+uniform mat4 u_projecao;
+uniform mat4 u_modelview;
+uniform mat3 u_normal;
+out vec3 v_pos;
+out vec3 v_normal;
+out vec2 v_uv;
+void main() {
+    vec4 pos = u_modelview * vec4(a_posicao, 1.0);
+    gl_Position = u_projecao * pos;
+    v_pos = pos.xyz;
+    v_normal = u_normal * vec3(0.0, 1.0, 0.0);   // o plano é horizontal
+    v_uv = a_uv;
+}
+"""
+
+TEXTURA_FRAG = """
+#version 330 core
+in vec3 v_pos;
+in vec3 v_normal;
+in vec2 v_uv;                  // interpolada para este pixel
+out vec4 f_cor;
+uniform sampler2D u_textura;
+uniform int u_modo;            // 0 NEAREST, 1 bilinear OpenGL, 2 bilinear própria, 3 (u, v)
+""" + ILUMINACAO + """
+// Filtragem bilinear feita por nós: lê os 4 texels vizinhos com texelFetch
+// (que NÃO filtra) e interpola. Centros dos texels em (i + 0,5) / n.
+vec3 bilinear_propria(vec2 uv) {
+    ivec2 n = textureSize(u_textura, 0);
+    vec2 t = uv * vec2(n) - 0.5;
+    ivec2 i0 = ivec2(floor(t));
+    vec2 f = t - vec2(i0);
+    ivec2 lim = n - 1;
+    vec3 c00 = texelFetch(u_textura, clamp(i0,               ivec2(0), lim), 0).rgb;
+    vec3 c10 = texelFetch(u_textura, clamp(i0 + ivec2(1, 0), ivec2(0), lim), 0).rgb;
+    vec3 c01 = texelFetch(u_textura, clamp(i0 + ivec2(0, 1), ivec2(0), lim), 0).rgb;
+    vec3 c11 = texelFetch(u_textura, clamp(i0 + ivec2(1, 1), ivec2(0), lim), 0).rgb;
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+void main() {
+    if (u_modo == 3) {                       // mostra as próprias coordenadas
+        f_cor = vec4(v_uv.x, v_uv.y, 0.0, 1.0);
+        return;
+    }
+    vec3 cor = (u_modo == 2) ? bilinear_propria(v_uv) : texture(u_textura, v_uv).rgb;
+    f_cor = vec4(iluminar(v_normal, v_pos, cor), 1.0);
+}
+"""
+
 
 def _compilar(fonte, tipo):
     shader = glCreateShader(tipo)
@@ -195,10 +251,15 @@ class Programa:
     def float(self, nome, x):
         glUniform1f(self._local(nome), float(x))
 
+    def int(self, nome, x):
+        glUniform1i(self._local(nome), int(x))
+
 
 def criar_programas():
     """Compila os três modelos de sombreamento (chamar com contexto OpenGL ativo)."""
-    return {nome: Programa(v, f) for nome, (v, f) in FONTES.items()}
+    programas = {nome: Programa(v, f) for nome, (v, f) in FONTES.items()}
+    programas["Textura"] = Programa(TEXTURA_VERT, TEXTURA_FRAG)
+    return programas
 
 
 def matriz_normal(modelview):
