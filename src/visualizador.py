@@ -2,9 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 3: remoção de superfícies escondidas (Back-Face Culling próprio
-e do OpenGL, Z-Buffer com visualização da profundidade), sombreamento
-Flat / Gouraud / Phong com shaders próprios e luz pontual móvel.
+TP2, versão 4: transparência com alpha blending e Painter's Algorithm,
+remoção de superfícies escondidas (Back-Face Culling próprio e do OpenGL,
+Z-Buffer), sombreamento Flat / Gouraud / Phong e luz pontual móvel.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -30,6 +30,8 @@ Teclas e mouse:
     D                      liga / desliga o Z-Buffer (teste de profundidade)
     V                      mostra o conteúdo do Z-Buffer em tons de cinza
     F                      pinta de vermelho as faces de trás
+    O                      opacidade dos vasos: 1,0 / 0,6 / 0,3
+    N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -65,6 +67,8 @@ MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
 LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
 PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
 CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
+OPACIDADES = [1.0, 0.6, 0.3]
+ORDENS = ["Painter's (trás → frente)", "sem ordenação"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -98,6 +102,8 @@ class Estado:
         self.ver_profundidade = False
         self.destacar_tras = False
         self.tri_desenhados = 0
+        self.opacidade = 0
+        self.ordem = 0
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -200,6 +206,9 @@ class Estado:
             total = len(self.vertices) // 3
             texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
                       f"triângulos | Z-Buffer {'ligado' if self.zbuffer else 'desligado'}")
+            if OPACIDADES[self.opacidade] < 1.0:
+                texto += (f" | opacidade {OPACIDADES[self.opacidade]:.1f}".replace(".", ",")
+                          + f" | ordem: {ORDENS[self.ordem]}")
             texto += (f"\n{self.sombreamento} | {COMPONENTES[self.componentes]} | "
                       f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
                       f"x{self.intensidade:.1f}")
@@ -269,25 +278,43 @@ def desenhar_com_shader(estado, modelview):
 
     total = len(estado.vertices) // 3
     modo = CULLING[estado.culling]
+    alfa = OPACIDADES[estado.opacidade]
+    prog.float("u_alfa", alfa)
+    transparente = alfa < 1.0
+    painter = transparente and ORDENS[estado.ordem].startswith("Painter")
+
+    # lista de triângulos: filtrada pelo culling próprio e/ou ordenada (Painter)
+    tris = None
     if modo == "próprio (N·V)":
-        # desenha só os triângulos que passaram no teste N . V > 0
-        visiveis = triangulos_de_frente(estado, modelview)
-        indices = (visiveis[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        tris = triangulos_de_frente(estado, modelview)
+    if painter:
+        tris = ordenar_tras_para_frente(estado, modelview,
+                                        np.arange(total) if tris is None else tris)
+
+    if modo == "OpenGL":
+        # o OpenGL decide pela ORDEM dos vértices já projetados na tela:
+        # anti-horário = frente (glFrontFace), horário = trás (descartada)
+        glEnable(GL_CULL_FACE)
+        glFrontFace(GL_CCW)
+        glCullFace(GL_BACK)
+    if painter:
+        # já ordenados: o Z-Buffer continua TESTANDO (objetos opacos tapam),
+        # mas não GRAVA, para um vaso transparente não esconder o de trás
+        glDepthMask(GL_FALSE)
+
+    if tris is None:
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+        estado.tri_desenhados = total     # o OpenGL não informa quantos descartou
+    else:
+        indices = (tris[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
         glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
-        estado.tri_desenhados = len(visiveis)
-    else:
-        if modo == "OpenGL":
-            # o OpenGL decide pela ORDEM dos vértices já projetados na tela:
-            # anti-horário = frente (glFrontFace), horário = trás (descartada)
-            glEnable(GL_CULL_FACE)
-            glFrontFace(GL_CCW)
-            glCullFace(GL_BACK)
-        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
-        glDisable(GL_CULL_FACE)
-        estado.tri_desenhados = total     # o OpenGL não informa quantos descartou
+        estado.tri_desenhados = len(tris)
+
+    glDepthMask(GL_TRUE)
+    glDisable(GL_CULL_FACE)
 
     for local in range(3):
         glDisableVertexAttribArray(local)
@@ -310,6 +337,18 @@ def triangulos_de_frente(estado, modelview):
     else:
         n_dot_v = normais[:, 2]
     return np.nonzero(n_dot_v > 0)[0]
+
+
+def ordenar_tras_para_frente(estado, modelview, tris):
+    """Painter's Algorithm: ordena os triângulos do mais distante ao mais próximo.
+
+    No espaço da câmera o observador olha para -z: quanto MAIS negativo o z
+    do centroide, mais longe está o triângulo. Desenhando nessa ordem, cada
+    triângulo transparente é composto sobre tudo o que está atrás dele,
+    como um pintor que pinta o fundo primeiro.
+    """
+    z = estado.tri_centro[tris] @ modelview[2, :3] + modelview[2, 3]
+    return tris[np.argsort(z, kind="stable")]
 
 
 def desenhar_luz(estado):
@@ -504,6 +543,10 @@ def tratar_tecla(estado, tecla):
         estado.ver_profundidade = not estado.ver_profundidade
     elif tecla == pygame.K_f:
         estado.destacar_tras = not estado.destacar_tras
+    elif tecla == pygame.K_o:
+        estado.opacidade = (estado.opacidade + 1) % len(OPACIDADES)
+    elif tecla == pygame.K_n:
+        estado.ordem = (estado.ordem + 1) % len(ORDENS)
     elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
