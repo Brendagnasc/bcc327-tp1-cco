@@ -2,9 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 4: transparência com alpha blending e Painter's Algorithm,
-remoção de superfícies escondidas (Back-Face Culling próprio e do OpenGL,
-Z-Buffer), sombreamento Flat / Gouraud / Phong e luz pontual móvel.
+TP2, versão 5: plano de referência com textura (NEAREST, bilinear do OpenGL
+e bilinear própria), transparência com Painter's Algorithm, Back-Face
+Culling, Z-Buffer, sombreamento Flat / Gouraud / Phong e luz pontual móvel.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -32,6 +32,8 @@ Teclas e mouse:
     F                      pinta de vermelho as faces de trás
     O                      opacidade dos vasos: 1,0 / 0,6 / 0,3
     N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
+    T                      mostra / esconde o plano de referência com textura
+    U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -54,6 +56,7 @@ from OpenGL.GL import *
 
 import shaders
 import transformacoes as T
+from textura import PlanoTexturizado
 from cores import mapear_cores
 from geometria import faixas_2d, normais_de_face, tubos_3d
 from leitor_vtk import ler_vtk
@@ -69,6 +72,7 @@ PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
 CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
 OPACIDADES = [1.0, 0.6, 0.3]
 ORDENS = ["Painter's (trás → frente)", "sem ordenação"]
+FILTROS = ["NEAREST", "bilinear (OpenGL)", "bilinear (própria)", "coordenadas (u, v)"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -104,6 +108,8 @@ class Estado:
         self.tri_desenhados = 0
         self.opacidade = 0
         self.ordem = 0
+        self.plano = True
+        self.filtro = 1
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -202,6 +208,8 @@ class Estado:
             aa = f"MSAA {self.amostras_msaa}x ligado" if self.msaa else "MSAA desligado"
         texto = (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
                  f"{MODOS[self.modo]} | {aa}")
+        if self.plano and self.arvore.eh_3d:
+            texto += f" | textura: {FILTROS[self.filtro]}"
         if self.normais is not None:
             total = len(self.vertices) // 3
             texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
@@ -232,7 +240,7 @@ def desenhar_arvore(estado):
 
     glMatrixMode(GL_MODELVIEW)
     glLoadMatrixf(T.para_opengl(modelview))
-    vbo_v, vbo_c, _ = estado.vbos
+    vbo_v, vbo_c = estado.vbos[:2]
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_v)
@@ -254,16 +262,7 @@ def desenhar_com_shader(estado, modelview):
     prog.mat4("u_modelview", modelview)
     prog.mat3("u_normal", shaders.matriz_normal(modelview))
 
-    # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
-    luz_camera = estado.matriz_visao() @ np.append(estado.luz, 1.0)
-    prog.vec3("u_luz_pos", luz_camera[:3])
-    prog.float("u_intensidade", estado.intensidade)
-    prog.float("u_ka", KA)
-    prog.float("u_kd", KD)
-    prog.float("u_ks", KS)
-    prog.float("u_brilho", BRILHO)
-    prog.float("u_usar_difusa", 1.0 if estado.componentes >= 1 else 0.0)
-    prog.float("u_usar_especular", 1.0 if estado.componentes >= 2 else 0.0)
+    enviar_luz(prog, estado)
 
     # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
     # recebe as normais de FACE em vez das normais dos vértices.
@@ -349,6 +348,40 @@ def ordenar_tras_para_frente(estado, modelview, tris):
     """
     z = estado.tri_centro[tris] @ modelview[2, :3] + modelview[2, 3]
     return tris[np.argsort(z, kind="stable")]
+
+
+def enviar_luz(prog, estado):
+    """Uniforms da iluminação, comuns aos vasos e ao plano."""
+    # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
+    luz_camera = estado.matriz_visao() @ np.append(estado.luz, 1.0)
+    prog.vec3("u_luz_pos", luz_camera[:3])
+    prog.float("u_intensidade", estado.intensidade)
+    prog.float("u_ka", KA)
+    prog.float("u_kd", KD)
+    prog.float("u_ks", KS)
+    prog.float("u_brilho", BRILHO)
+    prog.float("u_usar_difusa", 1.0 if estado.componentes >= 1 else 0.0)
+    prog.float("u_usar_especular", 1.0 if estado.componentes >= 2 else 0.0)
+
+
+plano_ref = None            # criado em inicializar_gl()
+
+
+def desenhar_plano(estado):
+    """Plano de referência texturizado. Fica no espaço do MUNDO (usa só V),
+    como um piso: não acompanha as transformações do modelo."""
+    prog = programas["Textura"]
+    prog.usar()
+    visao = estado.matriz_visao()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", visao)
+    prog.mat3("u_normal", shaders.matriz_normal(visao))
+    enviar_luz(prog, estado)
+    prog.int("u_textura", 0)                    # unidade de textura 0
+    prog.int("u_modo", estado.filtro)
+    filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
+    plano_ref.desenhar(filtro_gl)
+    glUseProgram(0)
 
 
 def desenhar_luz(estado):
@@ -484,6 +517,8 @@ def desenhar_quadro(estado, fonte):
 
     if estado.eixos:
         desenhar_eixos(estado)
+    if estado.plano and estado.arvore.eh_3d:
+        desenhar_plano(estado)                 # opaco: antes dos vasos transparentes
     desenhar_arvore(estado)
     if estado.normais is not None:
         desenhar_luz(estado)
@@ -547,6 +582,10 @@ def tratar_tecla(estado, tecla):
         estado.opacidade = (estado.opacidade + 1) % len(OPACIDADES)
     elif tecla == pygame.K_n:
         estado.ordem = (estado.ordem + 1) % len(ORDENS)
+    elif tecla == pygame.K_t:
+        estado.plano = not estado.plano
+    elif tecla == pygame.K_u:
+        estado.filtro = (estado.filtro + 1) % len(FILTROS)
     elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
@@ -598,6 +637,8 @@ def inicializar_gl():
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     programas.update(shaders.criar_programas())
+    global plano_ref
+    plano_ref = PlanoTexturizado()
     print("OpenGL:", glGetString(GL_VERSION).decode(),
           "| GLSL:", glGetString(GL_SHADING_LANGUAGE_VERSION).decode())
 
