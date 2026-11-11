@@ -33,7 +33,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \setlength{\headheight}{14pt}
-\rhead{\textcolor{darkslate}{\small \textbf{BCC327 -- Computação Gráfica} | TP1}}
+\rhead{\textcolor{darkslate}{\small \textbf{BCC327 -- Computação Gráfica} | TP2}}
 \lhead{\textcolor{darkslate}{\small Brenda Gabrielle Alves Nascimento | 24.1.4011}}
 \cfoot{\thepage}
 
@@ -46,11 +46,13 @@
     {\small #3}
   \end{minipage}}
 
+\newcommand{\vetor}[1]{\mathbf{#1}}
+
 \begin{document}
 
 % --- TÍTULO E AUTORES ---
 \begin{center}
-  {\LARGE \bfseries \textcolor{ufopred}{Visualização Geométrica, Rasterização e Recorte de Árvores Arteriais CCO}}\\[0.4cm]
+  {\LARGE \bfseries \textcolor{ufopred}{Visualização 3D Avançada de Árvores Arteriais CCO: Visibilidade, Iluminação e Técnicas Baseadas em Raios}}\\[0.4cm]
   {\large \textbf{Brenda Gabrielle Alves Nascimento}$^{1}$ (24.1.4011)}\\[0.2cm]
   {\small $^{1}$Departamento de Computação (DECOM), Universidade Federal de Ouro Preto (UFOP)\\[0.1cm]
   BCC327 -- Computação Gráfica, 2026.2 | Prof. Dr. Rafael Alves Bonfim de Queiroz}\\[0.4cm]
@@ -59,14 +61,14 @@
 % --- CAIXA DE RESUMO E PALAVRAS-CHAVE ---
 \begin{tcolorbox}[colback=lightgray, colframe=deepnavy, arc=3pt, title=\textbf{RESUMO}, fonttitle=\bfseries]
 \small
-\textbf{Contexto:} Árvores arteriais sintéticas geradas pelo método \emph{Constrained Constructive Optimization} (CCO) são descritas por pontos, segmentos e o raio de cada vaso, e precisam ser convertidas em imagem para análise visual.
-\textbf{Objetivo:} Desenvolver uma aplicação de Computação Gráfica que visualize os modelos CCO 2D e 3D e demonstre, com implementação própria, os algoritmos clássicos envolvidos na construção da imagem.
-\textbf{Metodologia:} A aplicação, em Python com pygame-ce, PyOpenGL e NumPy, tem um visualizador com leitor VTK, mapas de cores, faixas e tubos proporcionais ao raio, matrizes próprias de transformação, câmera e projeção, e MSAA; e um modo didático cujo framebuffer é escrito apenas pelos algoritmos do grupo: Bresenham, DDA, Scanline Fill, supersampling, Cohen--Sutherland, Liang--Barsky, Sutherland--Hodgman e Weiler--Atherton.
-\textbf{Resultados:} Os 12 modelos foram lidos corretamente; as matrizes coincidem com as funções equivalentes do OpenGL; os algoritmos foram validados contra testes de referência sem divergências; e as comparações visuais evidenciam projeções, aliasing e os limites do Sutherland--Hodgman com polígonos côncavos.
-\textbf{Conclusão:} A separação entre visualizador e modo didático permitiu aliar uma visualização fluida dos modelos à demonstração transparente, pixel a pixel, de cada algoritmo.
+\textbf{Contexto:} Árvores arteriais sintéticas geradas pelo método \emph{Constrained Constructive Optimization} (CCO) são estruturas 3D densas, com centenas de vasos que se cruzam em profundidade; uma imagem útil exige resolver visibilidade, dar volume por iluminação e permitir isolar e consultar vasos.
+\textbf{Objetivo:} Evoluir o visualizador do TP1 para uma aplicação de visualização científica 3D que implemente e compare as técnicas clássicas de visibilidade, iluminação, transparência, textura e técnicas baseadas em raios.
+\textbf{Metodologia:} A aplicação, em Python com pygame-ce, PyOpenGL e NumPy, desenha os vasos como tubos com normais e faces orientadas, e usa shaders GLSL próprios com o modelo de Blinn--Phong nos sombreamentos Flat, Gouraud e Phong. Foram implementados Back-Face Culling pelo critério $\vetor{N} \cdot \vetor{V}$, visualização linearizada do Z-Buffer, transparência com Painter's Algorithm, filtragem bilinear própria, seleção de vasos por Ray Casting (interseção raio--cilindro e raio--esfera), um mini Ray Tracer com sombras e reflexões e, como recurso adicional, métricas da árvore com filtro interativo por raio.
+\textbf{Resultados:} O culling próprio descarta cerca de metade dos triângulos sem alterar a imagem quando o Z-Buffer está ativo; sem Z-Buffer, nenhum dos dois tipos de culling resolve a oclusão entre vasos. As três técnicas de sombreamento, a ordenação dos transparentes e as filtragens foram comparadas visualmente; o exemplo numérico de bilinear coincide com o shader; e as métricas revelam que os 25\% de vasos mais grossos concentram 57\% do volume sanguíneo.
+\textbf{Conclusão:} O Z-Buffer é a técnica que garante a visibilidade correta; culling, ordenação e raios complementam o pipeline em desempenho, transparência e interação.
 
 \vspace{0.2cm}
-\textbf{Palavras-Chave:} Computação Gráfica; Método CCO; Rasterização; Recorte; Antialiasing.
+\textbf{Palavras-Chave:} Computação Gráfica; Método CCO; Visibilidade; Iluminação; Ray Tracing.
 \end{tcolorbox}
 
 \vspace{0.3cm}
@@ -74,68 +76,81 @@
 % ======================================================================
 \section{Introdução}
 
-O método CCO, introduzido por Schreiner e Buxbaum~\cite{schreiner1993}, gera árvores vasculares sintéticas que suprem um domínio de perfusão sob restrições fisiológicas. Cada modelo é um grafo em árvore: pontos no espaço, segmentos que ligam pares de pontos e um raio associado a cada segmento. Para que esses modelos sejam inspecionados, é preciso transformá-los em imagem, o que envolve todas as etapas clássicas do \emph{pipeline} gráfico.
+O método CCO, introduzido por Schreiner e Buxbaum~\cite{schreiner1993}, gera árvores vasculares sintéticas que suprem um domínio de perfusão sob restrições fisiológicas. Cada modelo é um grafo em árvore descrito por pontos, segmentos e um raio por segmento. No TP1 esses modelos foram lidos, transformados e desenhados como linhas, faixas e tubos, e os algoritmos clássicos de rasterização e recorte foram implementados num modo didático. A iluminação dos tubos, porém, era a do pipeline fixo do OpenGL, e a visibilidade ficava inteiramente a cargo da biblioteca.
 
-Este trabalho desenvolve uma aplicação para visualizar, transformar, rasterizar e recortar os modelos CCO 2D e 3D fornecidos em formato VTK. O foco não é apenas usar uma biblioteca gráfica, mas implementar e demonstrar os algoritmos clássicos. As contribuições são:
+Num modelo 3D com 511 vasos, os ramos se sobrepõem em vários níveis de profundidade, de modo que a imagem só é interpretável se a oclusão estiver correta, se a iluminação revelar a forma cilíndrica de cada vaso e se o usuário puder isolar subconjuntos e consultar vasos específicos. Este trabalho implementa e compara as técnicas que tratam esses problemas. As contribuições são:
 \begin{itemize}[leftmargin=*]
-  \item um leitor VTK próprio e um visualizador com linhas, faixas 2D e tubos 3D codificados por cor e espessura em função do raio;
-  \item matrizes próprias de translação, rotação, escala, câmera e projeções ortográfica e perspectiva, validadas contra o OpenGL;
-  \item um modo didático com framebuffer próprio para Bresenham, DDA, Scanline Fill e supersampling;
-  \item implementação e comparação de Cohen--Sutherland, Liang--Barsky, Sutherland--Hodgman e, como diferencial, Weiler--Atherton.
+  \item tubos 3D com normais de vértice e de face e orientação anti-horária consistente das faces;
+  \item Back-Face Culling próprio pelo critério $\vetor{N} \cdot \vetor{V}$, comparado ao do OpenGL, e visualização linearizada do Z-Buffer;
+  \item shaders GLSL próprios com o modelo de Blinn--Phong nos sombreamentos Flat, Gouraud e Phong, com luz pontual móvel;
+  \item transparência com Painter's Algorithm, plano de referência texturizado com filtragem bilinear própria;
+  \item seleção de vasos por Ray Casting e um mini Ray Tracer com raios primários, de sombra e refletidos;
+  \item como recurso adicional, métricas morfológicas da árvore e um filtro interativo por intervalo de raio.
 \end{itemize}
 
 % ======================================================================
 \section{Fundamentação Teórica}
 
-\subsection{Modelos CCO e formato VTK}
-Os modelos estão no formato VTK legado ASCII, com \texttt{DATASET POLYDATA}. A seção \texttt{POINTS} lista as coordenadas $(x, y, z)$; a seção \texttt{LINES} lista as células, cada uma no formato \texttt{2 i j}, ligando o ponto $i$ ao ponto $j$; e a seção \texttt{CELL\_DATA} traz o escalar \texttt{raio}, um valor por segmento. Como o raio é atributo de célula, toda a cor e a espessura de um vaso derivam de um único valor. As coordenadas estão em metros (domínio com cerca de 5\,cm de raio) e o raio em milímetros.
+\subsection{Modelos CCO e representação em tubos}
+Os modelos estão no formato VTK legado ASCII: a seção \texttt{POINTS} traz as coordenadas, em metros, \texttt{LINES} liga pares de pontos e \texttt{CELL\_DATA} traz o raio de cada segmento, em milímetros. Para a renderização 3D, cada segmento de extremidades $\vetor{a}$ e $\vetor{b}$ e raio $r$ é aproximado por um cilindro, cuja superfície lateral é uma malha de triângulos. O vértice $k$ de um anel é $\vetor{a} + r(\cos\theta_k\,\vetor{e}_1 + \sin\theta_k\,\vetor{e}_2)$, em que $(\vetor{d}, \vetor{e}_1, \vetor{e}_2)$ é uma base ortonormal com $\vetor{d}$ ao longo do eixo; a normal desse vértice é o próprio vetor radial $\cos\theta_k\,\vetor{e}_1 + \sin\theta_k\,\vetor{e}_2$.
 
-\subsection{Modelo de cor}
-Um mapa contínuo de cores associa a cada escalar normalizado $t = (r - r_{\min})/(r_{\max} - r_{\min}) \in [0, 1]$ uma cor RGB obtida por interpolação linear entre cores de controle. Foram usados dois mapas. O \emph{jet} (arco-íris) reproduz o estilo das figuras de referência e tem alto contraste, mas não é perceptualmente uniforme: o ciano e o amarelo criam fronteiras aparentes inexistentes nos dados~\cite{borland2007}. O \emph{viridis} é perceptualmente uniforme e legível por daltônicos e em escala de cinza. O modelo RGB foi adotado por ser o espaço nativo do framebuffer.
-
-\subsection{Transformações geométricas e câmera}
-Em coordenadas homogêneas, um ponto $\mathbf{p} = (x, y, z, 1)^T$ é transformado por matrizes $4 \times 4$, o que permite expressar translação como produto matricial:
+\subsection{Visibilidade}
+\textbf{Back-Face Culling.} Num objeto fechado, as faces cuja normal aponta para longe do observador estão sempre escondidas pelas faces da frente. Sendo $\vetor{N}$ a normal da face e $\vetor{V}$ o vetor da face para o observador, ambos no espaço da câmera, a face é descartada quando
 \begin{equation}
-  T = \begin{bmatrix} 1&0&0&t_x\\ 0&1&0&t_y\\ 0&0&1&t_z\\ 0&0&0&1 \end{bmatrix},\quad
-  S = \begin{bmatrix} s_x&0&0&0\\ 0&s_y&0&0\\ 0&0&s_z&0\\ 0&0&0&1 \end{bmatrix},\quad
-  R_z(\theta) = \begin{bmatrix} \cos\theta&-\sin\theta&0&0\\ \sin\theta&\cos\theta&0&0\\ 0&0&1&0\\ 0&0&0&1 \end{bmatrix}.
+  \vetor{N} \cdot \vetor{V} \le 0, \qquad
+  \vetor{V} = \begin{cases} -\vetor{c}, & \text{perspectiva (observador na origem, } \vetor{c} \text{ = centroide da face)},\\ (0, 0, 1), & \text{ortográfica (raios de projeção paralelos a } z\text{)}. \end{cases}
 \end{equation}
-O vértice percorre $\mathbf{p}_{\text{recorte}} = P \cdot V \cdot M \cdot \mathbf{p}_{\text{modelo}}$, em que $M$ leva o modelo ao \textbf{espaço do mundo}, $V$ leva o mundo ao \textbf{sistema de coordenadas da câmera} e $P$ aplica a projeção. O espaço do mundo é o referencial fixo da cena, comum a todos os objetos. O sistema da câmera é a mesma cena descrita do ponto de vista do observador: a câmera fica na origem, olhando para $-z$. A matriz $V$ é montada a partir do olho $\mathbf{e}$, do alvo $\mathbf{a}$ e de um vetor ``cima'' $\mathbf{c}$, que definem a base ortonormal da câmera
+O OpenGL usa um critério equivalente, aplicado depois da projeção: a face é de frente se seus vértices aparecem em sentido anti-horário na tela. Esse critério só funciona se todos os triângulos forem orientados de forma consistente, isto é, anti-horários vistos de fora, o que pela regra da mão direita equivale a $(\vetor{v}_1 - \vetor{v}_0) \times (\vetor{v}_2 - \vetor{v}_0)$ apontar para fora. O culling elimina cerca de metade dos triângulos, mas \emph{não} resolve a oclusão entre objetos distintos: a face da frente de um vaso distante continua sendo desenhada mesmo se um vaso próximo a cobrir.
+
+\textbf{Z-Buffer.} O algoritmo de Catmull~\cite{catmull1974, foley1990} guarda, para cada pixel, a profundidade do fragmento mais próximo já desenhado. Um novo fragmento só é escrito se estiver mais perto, de modo que o resultado independe da ordem de desenho. Na projeção perspectiva com planos $n$ (near) e $f$ (far), a profundidade armazenada $d \in [0, 1]$ não é linear na distância $z$ à câmera; a relação inversa é
 \begin{equation}
-  \mathbf{w} = \frac{\mathbf{e} - \mathbf{a}}{\|\mathbf{e} - \mathbf{a}\|},\qquad
-  \mathbf{u} = \frac{\mathbf{c} \times \mathbf{w}}{\|\mathbf{c} \times \mathbf{w}\|},\qquad
-  \mathbf{v} = \mathbf{w} \times \mathbf{u},
+  z = \frac{2 n f}{(f + n) - (2d - 1)(f - n)},
+  \label{eq:linear}
 \end{equation}
-e $V$ translada o olho para a origem e reescreve cada ponto nessa base.
+e a resolução do buffer se concentra perto do plano $n$.
 
-Na \textbf{projeção ortográfica} os raios de projeção são paralelos: a matriz apenas mapeia uma caixa no cubo $[-1,1]^3$, e o tamanho aparente não depende da distância. Na \textbf{projeção perspectiva}, a última linha da matriz é $(0, 0, -1, 0)$, que copia a profundidade para $w$; na divisão por $w$, objetos distantes ficam menores e retas paralelas convergem.
-
-\subsection{Rasterização de segmentos}
-O algoritmo de Bresenham~\cite{bresenham1965} rasteriza um segmento usando apenas aritmética inteira. No caso $0 \le m \le 1$, $x$ avança sempre uma unidade e a variável de decisão $p_k$, proporcional à diferença entre as distâncias da reta ideal aos dois pixels candidatos, escolhe entre manter ou incrementar $y$:
+\subsection{Iluminação: modelo de Blinn--Phong}
+O modelo de reflexão de Phong~\cite{phong1975}, na variante de Blinn~\cite{blinn1977}, soma três componentes num ponto de cor $\vetor{c}$ e normal $\vetor{N}$:
 \begin{equation}
-  p_0 = 2\Delta y - \Delta x,\qquad
-  p_{k+1} = \begin{cases} p_k + 2\Delta y, & p_k < 0 \\ p_k + 2\Delta y - 2\Delta x \ \ (y \leftarrow y+1), & p_k \ge 0. \end{cases}
+  I = k_a\,\vetor{c} + I_L\left[k_d\,\vetor{c}\,\max(\vetor{N}\cdot\vetor{L}, 0) + k_s \max(\vetor{N}\cdot\vetor{H}, 0)^{\alpha}\right],
+  \qquad \vetor{H} = \frac{\vetor{L} + \vetor{V}}{\|\vetor{L} + \vetor{V}\|},
 \end{equation}
-Os demais octantes são obtidos trocando os papéis de $x$ e $y$ e os sinais dos incrementos. O DDA, implementado para comparação, soma incrementos reais $\Delta y / \Delta x$ e arredonda cada posição, exigindo ponto flutuante a cada passo.
+em que $\vetor{L}$ aponta para a luz pontual, $\vetor{V}$ para o observador e $I_L$ é a intensidade da fonte. A componente \textbf{ambiente} aproxima a luz indireta e é constante; a \textbf{difusa} (lambertiana) depende apenas do ângulo entre a normal e a luz e independe do observador; a \textbf{especular} produz o brilho, cujo tamanho diminui com o expoente $\alpha$. O vetor intermediário $\vetor{H}$ evita calcular o vetor refletido. Como as normais precisam continuar perpendiculares à superfície depois das transformações, elas são transformadas pela matriz $(M_{3\times3}^{-1})^T$, e não pela própria modelview.
 
-\subsection{Preenchimento de polígonos por Scanline}
-O Scanline Fill~\cite{foley1990} percorre o polígono linha a linha. Uma \emph{tabela de arestas} (ET) guarda cada aresta não horizontal no balde da linha onde começa, com $(y_{\max}, x, 1/m)$. Em cada linha, as arestas que começam entram na \emph{tabela de arestas ativas} (AET), as que terminaram saem, os $x$ são ordenados e preenchidos aos pares (regra par-ímpar), e cada $x$ avança $1/m$ para a linha seguinte, aproveitando a coerência entre linhas. O intervalo semiaberto $[y_{\min}, y_{\max})$ faz com que um vértice compartilhado seja contado uma única vez.
+\subsection{Sombreamento: Flat, Gouraud e Phong}
+Os três métodos usam a mesma equação e diferem em \emph{onde} ela é avaliada. No \textbf{Flat}, uma vez por triângulo, com a normal da face: a malha aparece facetada. No \textbf{Gouraud}~\cite{gouraud1971}, uma vez por vértice, com as normais de vértice; as cores resultantes são interpoladas no triângulo, o que suaviza a malha mas pode perder ou borrar um brilho especular que caia no interior de um triângulo grande. No \textbf{Phong}~\cite{phong1975}, as \emph{normais} são interpoladas e a equação é avaliada em cada pixel, reproduzindo o brilho especular com fidelidade ao custo de mais operações por fragmento.
 
-\subsection{Aliasing e antialiasing}
-O aliasing surge porque um pixel só pode estar aceso ou apagado: bordas inclinadas viram degraus e detalhes menores que um pixel geram padrões espúrios. No \textbf{supersampling} (SSAA), a cena é renderizada numa grade $k$ vezes maior em cada direção e reduzida pela média de cada bloco $k \times k$, de modo que a cor final é proporcional à cobertura. No \textbf{MSAA}, cada pixel armazena várias amostras de cobertura e profundidade, mas o fragmento é sombreado uma única vez; na resolução, as amostras são promediadas. O custo é muito menor que o do SSAA e o efeito se concentra nas bordas dos objetos.
+\subsection{Transparência e Painter's Algorithm}
+Com alpha blending, a cor de um fragmento de opacidade $\alpha$ é composta com a já presente no framebuffer:
+\begin{equation}
+  C = \alpha\,C_{\text{novo}} + (1 - \alpha)\,C_{\text{antigo}}.
+\end{equation}
+A operação não é comutativa: o resultado só é correto se as superfícies forem compostas de trás para frente. O Painter's Algorithm~\cite{newell1972} ordena as primitivas pela profundidade e as desenha da mais distante à mais próxima, como um pintor que pinta o fundo primeiro. A ordenação por um único valor de profundidade (por exemplo, o centroide) falha quando triângulos se interpenetram ou se sobrepõem ciclicamente.
 
-\subsection{Recorte de segmentos}
-O \textbf{Cohen--Sutherland}~\cite{newman1979} atribui a cada extremidade um código de 4 bits que indica em quais semiplanos externos à janela o ponto está. Se $c_0 \lor c_1 = 0$, o segmento é aceito inteiro; se $c_0 \land c_1 \neq 0$, as duas extremidades estão do mesmo lado de fora e o segmento é rejeitado; caso contrário, uma extremidade externa é substituída pela interseção com uma borda e o teste se repete. O \textbf{Liang--Barsky}~\cite{liang1984} usa a forma paramétrica $P(t) = P_0 + t(P_1 - P_0)$, $t \in [0,1]$, e as desigualdades $p_k t \le q_k$, com $p = (-\Delta x, \Delta x, -\Delta y, \Delta y)$ e $q = (x_0 - x_{\min}, x_{\max} - x_0, y_0 - y_{\min}, y_{\max} - y_0)$. Para $p_k < 0$ a reta entra pela borda e $t_0 = \max(t_0, q_k/p_k)$; para $p_k > 0$ ela sai e $t_1 = \min(t_1, q_k/p_k)$; se $t_0 > t_1$, nada resta. As interseções só são calculadas no final.
+\subsection{Mapeamento de textura e filtragem}
+Cada vértice recebe coordenadas $(u, v) \in [0,1]^2$ que indicam o ponto da imagem colado a ele; o rasterizador interpola $(u, v)$ e, em cada pixel, a cor é buscada na textura. Numa textura de $n \times n$ texels, com centros em $(i + 0{,}5)/n$, a filtragem \textbf{NEAREST} usa o texel mais próximo, $i = \lfloor u n \rfloor$, e produz blocos quando a textura é ampliada. A filtragem \textbf{bilinear} faz $t_x = u n - 0{,}5$, $i_0 = \lfloor t_x \rfloor$, $f_x = t_x - i_0$ (e o análogo em $v$) e interpola os quatro vizinhos:
+\begin{equation}
+  \vetor{c} = (1 - f_y)\left[(1 - f_x)\,\vetor{c}_{00} + f_x\,\vetor{c}_{10}\right] + f_y\left[(1 - f_x)\,\vetor{c}_{01} + f_x\,\vetor{c}_{11}\right].
+  \label{eq:bilinear}
+\end{equation}
 
-O \textbf{Cyrus--Beck}~\cite{cyrus1978}, apenas discutido, generaliza a ideia paramétrica para \emph{qualquer janela convexa}: para cada aresta, com normal $\mathbf{n}_i$ e ponto $\mathbf{f}_i$, resolve $\mathbf{n}_i \cdot (P(t) - \mathbf{f}_i) = 0$ e classifica a interseção como entrada ou saída pelo sinal de $\mathbf{n}_i \cdot (P_1 - P_0)$. Sua principal diferença em relação aos dois anteriores é não exigir janela retangular alinhada aos eixos; o Liang--Barsky é justamente o Cyrus--Beck especializado para esse caso, em que os produtos escalares se reduzem aos $p_k$ e $q_k$.
+\subsection{Ray Casting e Ray Tracing}
+No \textbf{Ray Casting}~\cite{appel1968}, um raio $P(t) = \vetor{O} + t\vetor{D}$ parte do observador por um pixel e o objeto visível é o de menor $t > 0$. Para um cilindro de eixo unitário $\vetor{a}$, base $\vetor{A}$ e comprimento $h$, com $\vetor{m} = \vetor{O} - \vetor{A}$, a superfície lateral é o conjunto de pontos cuja parte perpendicular ao eixo tem comprimento $r$, o que leva a
+\begin{equation}
+  k_2 t^2 + k_1 t + k_0 = 0,\quad
+  k_2 = \vetor{D}\cdot\vetor{D} - (\vetor{D}\cdot\vetor{a})^2,\quad
+  k_1 = 2\left[\vetor{m}\cdot\vetor{D} - (\vetor{m}\cdot\vetor{a})(\vetor{D}\cdot\vetor{a})\right],\quad
+  k_0 = \vetor{m}\cdot\vetor{m} - (\vetor{m}\cdot\vetor{a})^2 - r^2,
+  \label{eq:cilindro}
+\end{equation}
+e a raiz só vale se a projeção do ponto no eixo, $s = \vetor{m}\cdot\vetor{a} + t\,\vetor{D}\cdot\vetor{a}$, estiver em $[0, h]$. Para a esfera de centro $\vetor{C}$, com $\vetor{m} = \vetor{O} - \vetor{C}$: $(\vetor{D}\cdot\vetor{D})t^2 + 2(\vetor{m}\cdot\vetor{D})t + \vetor{m}\cdot\vetor{m} - r^2 = 0$.
 
-\subsection{Recorte de polígonos}
-O \textbf{Sutherland--Hodgman}~\cite{sutherland1974} trata a janela convexa como interseção de semiplanos e recorta o polígono contra cada aresta em sequência. Para cada aresta $S \to P$ do polígono: se ambos estão dentro, emite $P$; se só $S$ está dentro, emite a interseção $I$; se ambos estão fora, nada; se só $P$ está dentro, emite $I$ e $P$. Ele sempre produz \emph{um único} polígono; quando o resultado correto tem várias componentes, elas ficam ligadas por arestas degeneradas sobre a borda da janela. O \textbf{Weiler--Atherton}~\cite{weiler1977} insere as interseções nas listas de vértices do sujeito e da janela, classifica-as como entrada ou saída e percorre as duas fronteiras alternadamente, produzindo uma lista de polígonos. Ele é mais adequado quando o sujeito ou a janela são côncavos, quando o resultado tem múltiplas regiões ou quando há interseções complexas entre as fronteiras.
+O \textbf{Ray Tracing} de Whitted~\cite{whitted1980} estende o Ray Casting com raios secundários: do ponto atingido, um \emph{raio de sombra} vai até a luz, e se algum objeto o interceptar resta apenas a componente ambiente; em superfícies espelhadas, um \emph{raio refletido} $\vetor{R} = \vetor{D} - 2(\vetor{D}\cdot\vetor{N})\vetor{N}$ é traçado recursivamente e sua cor é misturada à local com o coeficiente de reflexão $k_r$. Sombras e reflexões, que no pipeline de rasterização exigem técnicas à parte, surgem naturalmente.
 
 % ======================================================================
 \section{Metodologia e Arquitetura da Aplicação}
 
-A aplicação foi escrita em Python 3 com pygame-ce 2.5.2 (janela e entrada), PyOpenGL 3.1.7 e NumPy 2.1.3. Ela é composta por dois programas que compartilham os módulos da Tabela~\ref{tab:modulos}: o \textbf{visualizador}, que usa OpenGL para desenhar os modelos com as matrizes e a geometria calculadas pelo grupo, e o \textbf{modo didático}, uma matriz NumPy de $80 \times 60$ pixels, ampliada na tela, na qual apenas os algoritmos do grupo escrevem. O pygame-ce somente amplia essa matriz, de modo que nenhum pixel do modo didático é produzido pela biblioteca.
+A aplicação foi escrita em Python 3 com pygame-ce 2.5.2 (janela e entrada), PyOpenGL 3.1.7 e NumPy 2.1.3, com OpenGL 3.3 e GLSL 3.30. A Tabela~\ref{tab:modulos} resume os módulos e a origem de cada funcionalidade. O visualizador abre o mini Ray Tracer pela tecla \texttt{Y}; os dois também funcionam separadamente.
 
 \begin{table}[H]
   \centering
@@ -146,202 +161,234 @@ A aplicação foi escrita em Python 3 com pygame-ce 2.5.2 (janela e entrada), Py
     \toprule
     \textbf{Módulo} & \textbf{Conteúdo} & \textbf{Origem} \\
     \midrule
-    \texttt{leitor\_vtk.py} & Leitor de VTK legado (POINTS, LINES, CELL\_DATA) & grupo \\
-    \texttt{cores.py} & Mapas jet e viridis por interpolação linear & grupo \\
-    \texttt{geometria.py} & Faixas 2D (retângulos e discos) e tubos 3D (cilindros, esferas e normais) & grupo \\
-    \texttt{transformacoes.py} & Translação, rotação, escala, câmera, projeções & grupo \\
-    \texttt{rasterizacao.py} & Bresenham, DDA e Scanline Fill & grupo \\
-    \texttt{antialiasing.py} & Supersampling com filtro caixa & grupo \\
-    \texttt{recorte.py} & Cohen--Sutherland, Liang--Barsky, Sutherland--Hodgman, Weiler--Atherton & grupo \\
-    \texttt{visualizador.py} & Rasterização dos triângulos, profundidade, iluminação, MSAA, VBOs & OpenGL \\
-    \texttt{modo\_didatico.py} & Framebuffer próprio e interações; janela e texto & grupo / pygame-ce \\
+    \texttt{leitor\_vtk.py}, \texttt{cores.py} & Leitor VTK e mapas de cores jet e viridis (TP1) & própria \\
+    \texttt{geometria.py} & Tubos (cilindros e esferas), normais de vértice e de face, orientação das faces & própria \\
+    \texttt{transformacoes.py} & Matrizes de modelo, câmera e projeções (TP1) & própria \\
+    \texttt{shaders.py} & Blinn--Phong, Flat, Gouraud, Phong, transparência, textura e bilinear em GLSL & própria \\
+    \texttt{visualizador.py} & Culling por $\vetor{N}\cdot\vetor{V}$, linearização do Z-Buffer, Painter's Algorithm, filtro por raio & própria \\
+    \texttt{textura.py} & Textura gerada, coordenadas $(u, v)$, NEAREST e bilinear em NumPy & própria \\
+    \texttt{raycasting.py} & Raio pelo pixel, interseção raio--cilindro e raio--esfera & própria \\
+    \texttt{raytracer.py} & Mini Ray Tracer com raios primários, de sombra e refletidos & própria \\
+    \texttt{metricas.py} & Grafo, BFS, gerações, comprimento, volume, bifurcações & própria \\
+    --- & Compilação de shaders, rasterização, interpolação de atributos, teste de profundidade, culling ``OpenGL'', blending, amostragem de textura, MSAA & OpenGL \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-\textbf{Primitivas.} Além de linhas, cada segmento 2D vira uma faixa de largura $2r$ (dois triângulos), com um disco em cada extremidade que arredonda as junções. Em 3D, cada segmento vira um cilindro de 12 lados construído a partir da base ortonormal $(\mathbf{d}, \mathbf{e}_1, \mathbf{e}_2)$ do segmento, com esferas nos pontos da árvore; cada esfera recebe o raio e a cor do maior vaso que passa pelo ponto. A espessura desenhada é $r \times 10^{-3} \times$ exagero, convertendo milímetros em metros, com exagero ajustável (padrão $2\times$). Os vasos são desenhados do mais fino para o mais grosso, para que os troncos fiquem por cima nas bifurcações. A iluminação dos tubos (luz direcional e ambiente do pipeline fixo) é da API e serve apenas para dar volume; o estudo de iluminação é tema do TP2.
+\textbf{Geometria.} Cada segmento vira um cilindro de 12 lados (24 triângulos) e cada ponto da árvore, uma esfera de $8 \times 4$ setores que fecha as junções, com o raio do vaso mais grosso que passa por ele. Os triângulos de área nula nos polos das esferas são removidos, restando 48 por esfera; o modelo Nterm512 tem 73\,704 triângulos. A espessura desenhada é $r \times 10^{-3} \times$ exagero (padrão $2\times$). Depois de gerados, todos os triângulos são verificados: se $(\vetor{v}_1 - \vetor{v}_0) \times (\vetor{v}_2 - \vetor{v}_0)$ discorda da média das normais dos vértices, $\vetor{v}_1$ e $\vetor{v}_2$ são trocados, garantindo a orientação anti-horária exigida pelo culling do OpenGL. Para o Flat, uma normal de face por triângulo é repetida nos três vértices e enviada no lugar da normal de vértice.
 
-\textbf{Transformações e observador.} A matriz do modelo é $M = T \cdot R_x \cdot R_y \cdot R_z \cdot S \cdot N$, em que $N$ centraliza o modelo e normaliza seu tamanho para que a mesma câmera sirva a 2D e 3D. Há quatro vistas (frontal, lateral, superior e isométrica). Para que o modelo não mude de tamanho ao trocar de projeção, a caixa ortográfica tem meia altura $h = d \tan(\text{fovy}/2)$, igual à altura do tronco de pirâmide perspectivo na distância $d$ do alvo. Os eixos do mundo são desenhados só com $V$, permanecendo fixos enquanto o modelo é transformado.
+\textbf{Pipeline programável.} Os vértices, cores, normais de vértice e normais de face ficam em VBOs, enviados uma única vez. As matrizes $P$ e $VM$, calculadas pelas funções do TP1, e a matriz das normais $(VM_{3\times3}^{-1})^T$ vão como \emph{uniforms}, assim como a luz, cuja posição no mundo é levada ao espaço da câmera por $V$. A iluminação é calculada no espaço da câmera, onde o observador está na origem e $\vetor{V} = -\vetor{p}$. No Flat, o atributo de saída usa o qualificador \texttt{flat}, que desliga a interpolação; no Gouraud, a função de iluminação é chamada no vertex shader; no Phong, no fragment shader, com a normal interpolada renormalizada. Os coeficientes são $k_a = 0{,}25$, $k_d = 0{,}75$, $k_s = 0{,}6$ e $\alpha = 40$; a especular é anulada quando $\vetor{N}\cdot\vetor{L} \le 0$, para não haver brilho no lado escuro. As teclas \texttt{K} e \texttt{L} ligam as componentes uma a uma e movem a luz, e um uniform pinta de vermelho os fragmentos com \texttt{gl\_FrontFacing} falso, revelando faces de trás.
 
-\textbf{Antialiasing.} O SSAA do modo didático reutiliza o Bresenham e o Scanline: a cena é rasterizada numa grade $k$ vezes maior, com cada pixel de linha carimbado como um bloco $k \times k$ (para manter a largura de um pixel final), e reduzida com \texttt{reshape} e média. A mesma função com $k = 1$ gera a versão serrilhada, garantindo uma comparação justa. O MSAA do visualizador usa um framebuffer fora da tela (FBO) com 4 amostras por pixel, resolvido para a janela com \texttt{glBlitFramebuffer}, o que não depende de a janela oferecer multiamostragem.
+\textbf{Visibilidade.} No modo ``próprio'', a cada quadro as normais de face e os centroides dos triângulos são levados ao espaço da câmera em NumPy, o critério $\vetor{N}\cdot\vetor{V} > 0$ seleciona os triângulos de frente e só os seus índices são enviados num \emph{element buffer} e desenhados com \texttt{glDrawElements}. No modo ``OpenGL'', são usados \texttt{glFrontFace(GL\_CCW)} e \texttt{glCullFace(GL\_BACK)}. O Z-Buffer pode ser desligado; nesse caso vale o último triângulo desenhado, na ordem do VBO. Para visualizá-lo, o buffer de profundidade é lido com \texttt{glReadPixels}, linearizado pela Equação~\eqref{eq:linear} com $n = 0{,}01$ e $f = 100$ e normalizado entre a menor e a maior distância visíveis, com o mais próximo em tom mais escuro.
 
-\textbf{Recorte.} Os segmentos são recortados em coordenadas reais e só depois rasterizados, o que caracteriza recorte geométrico e não apenas descarte de pixels. O Sutherland--Hodgman aceita qualquer janela convexa, com o teste ``dentro'' feito pelo sinal do produto vetorial $(B - A) \times (P - A)$ para a janela em sentido anti-horário. No Weiler--Atherton, vértices exatamente sobre arestas, comuns em uma grade inteira, impedem a classificação de entrada e saída; nesses casos a janela é deslocada por $10^{-6}$ vezes o tamanho da cena, valor desprezível para o resultado.
+\textbf{Transparência.} A opacidade dos vasos é 1,0, 0,6 ou 0,3. Com o Painter's Algorithm ativo, os triângulos são ordenados a cada quadro pela coordenada $z$ do centroide no espaço da câmera (mais negativo = mais distante). O plano opaco é desenhado antes; durante o desenho dos transparentes, o teste de profundidade continua ativo, para que objetos opacos os escondam, mas a escrita no Z-Buffer é desligada (\texttt{glDepthMask(GL\_FALSE)}), para que um vaso transparente não impeça a composição dos que estão atrás. O modo ``sem ordenação'' desenha na ordem do VBO, para comparação.
+
+\textbf{Textura.} A textura é gerada em NumPy: uma imagem de $32 \times 32$ texels, propositalmente pequena, com um quadriculado $4 \times 4$ e o contorno circular do domínio de perfusão. Ela é aplicada a um plano de referência sob a árvore, com $(u, v)$ de $(0, 0)$ a $(1, 1)$ nos cantos, e iluminada pela mesma luz. Há quatro modos: NEAREST e bilinear pelo OpenGL (\texttt{GL\_NEAREST}, \texttt{GL\_LINEAR}); bilinear própria, que lê os quatro texels com \texttt{texelFetch} (que não filtra) e aplica a Equação~\eqref{eq:bilinear}; e a exibição das próprias coordenadas, com $u$ no canal vermelho e $v$ no verde.
+
+\textbf{Ray Casting.} No clique direito, o pixel vira coordenadas normalizadas $(x, y)$; os pontos $(x, y, -1)$ e $(x, y, 1)$ do cubo NDC, levados ao mundo por $(PV)^{-1}$ e divididos por $w$, dão a origem e a direção do raio, o que serve às duas projeções. O raio é levado ao espaço do modelo por $M^{-1}$ (direção com $w = 0$), onde o parâmetro $t$ é preservado, e testado, de forma vetorizada, contra todos os vasos visíveis no filtro, cada um modelado como cilindro (Eq.~\ref{eq:cilindro}) mais duas esferas, a mesma forma dos tubos. O vaso de menor $t$ é pintado de magenta, cor ausente dos dois mapas, e suas informações são exibidas.
+
+\textbf{Mini Ray Tracer.} Escrito inteiramente em NumPy, sem OpenGL, traça todos os raios de uma vez como vetores. A cena é uma bifurcação CCO simplificada (três cilindros com raios decrescentes e esferas nas junções, coloridos pelo mapa jet), uma esfera espelhada ($k_r = 0{,}8$), uma esfera fosca e um piso quadriculado levemente refletor ($k_r = 0{,}25$), iluminados por uma luz pontual. Os raios secundários partem de $P + 10^{-3}\vetor{N}$ para evitar que a superfície intercepte o próprio raio (\emph{shadow acne}), e as reflexões vão até a profundidade 3. Os modos 1, 2 e 3 correspondem a Ray Casting, Ray Casting com sombras e Ray Tracing completo.
+
+\textbf{Recurso adicional: métricas e filtro por raio.} A árvore é tratada como grafo: pontos de grau 1 são a raiz ou terminais e pontos de grau 3 são bifurcações. A raiz é a extremidade cujo segmento tem maior raio; uma busca em largura a partir dela orienta os segmentos de pai para filho e dá a \emph{geração} de cada vaso (número de bifurcações até a raiz). São calculados o comprimento e o volume $\pi r^2 \ell$ de cada vaso e, em cada bifurcação, a razão $r_p^3/(r_{f_1}^3 + r_{f_2}^3)$, que vale 1 se a lei de Murray~\cite{murray1926} for respeitada. O modo intervalo (tecla \texttt{I}) ajusta o raio mínimo e máximo exibidos; os vasos fora do intervalo são retirados da lista de triângulos e da seleção, e o painel (tecla \texttt{J}) mostra as métricas da árvore e do subconjunto filtrado.
 
 % ======================================================================
 \section{Resultados}
 
-\subsection{Leitura e representação dos modelos}
-A Tabela~\ref{tab:modelos} resume os modelos lidos. Em todos, o número de pontos é $2 N_{\text{term}}$ e o de segmentos é igual ao de pontos menos um, assinatura de uma árvore conexa e sem ciclos, o que confirma a leitura. A Figura~\ref{fig:m1} mostra as representações do visualizador.
+Todas as figuras foram geradas pelo script \texttt{gerar\_figuras.py}, que reproduz as configurações automaticamente. O rodapé de cada captura informa os modos ativos e, quando há culling, quantos triângulos foram desenhados.
 
-\begin{table}[H]
-  \centering
-  \small
-  \caption{Modelos CCO lidos: número de pontos, segmentos e intervalo do raio.}
-  \label{tab:modelos}
-  \begin{tabular}{lcccc|lcccc}
-    \toprule
-    \textbf{Modelo 2D} & \textbf{Pontos} & \textbf{Seg.} & $r_{\min}$ & $r_{\max}$ &
-    \textbf{Modelo 3D} & \textbf{Pontos} & \textbf{Seg.} & $r_{\min}$ & $r_{\max}$ \\
-    \midrule
-    Nterm008 & 16  & 15  & 0,2491 & 0,6668 & Nterm016 & 32   & 31   & 0,2261 & 0,6870 \\
-    Nterm016 & 32  & 31  & 0,2279 & 0,8176 & Nterm032 & 64   & 63   & 0,2132 & 0,8373 \\
-    Nterm032 & 64  & 63  & 0,2058 & 0,9804 & Nterm064 & 128  & 127  & 0,2052 & 1,0178 \\
-    Nterm064 & 128 & 127 & 0,2032 & 1,1814 & Nterm128 & 256  & 255  & 0,1454 & 1,2258 \\
-    Nterm128 & 256 & 255 & 0,1454 & 1,1930 & Nterm256 & 512  & 511  & 0,1192 & 1,2472 \\
-    Nterm256 & 512 & 511 & 0,1074 & 1,1937 & Nterm512 & 1024 & 1023 & 0,0956 & 1,2666 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+\subsection{Geometria 3D e observador}
+A Figura~\ref{fig:m1} mostra o modelo Nterm256 em tubos sobre o plano de referência e em três vistas do observador. A Tabela~\ref{tab:metricas} resume os modelos 3D; os números de triângulos mostram o crescimento linear da malha com o número de vasos.
 
 \begin{figure}[H]
   \centering
-  \painel{0.24}{m1_linhas_jet}{(a) linhas, jet}\hfill
-  \painel{0.24}{m1_faixas_jet}{(b) faixas, jet}\hfill
-  \painel{0.24}{m1_faixas_viridis}{(c) faixas, viridis}\hfill
-  \painel{0.24}{m1_tubos_3d}{(d) tubos 3D}
-  \caption{Representações do modelo: (a) linhas coloridas pelo raio; (b) e (c) espessura e cor proporcionais ao raio nos dois mapas; (d) tubos 3D iluminados (Nterm256).}
+  \painel{0.24}{m1_tubos}{(a) isométrica}\hfill
+  \painel{0.24}{m1_vista_frontal}{(b) frontal}\hfill
+  \painel{0.24}{m1_vista_lateral}{(c) lateral}\hfill
+  \painel{0.24}{m1_vista_superior}{(d) superior}
+  \caption{Modelo 3D Nterm256 representado por tubos com espessura e cor proporcionais ao raio, iluminados por Phong.}
   \label{fig:m1}
 \end{figure}
 
-\subsection{Transformações, observador e projeções}
-A Figura~\ref{fig:m2t} mostra translação, rotação e escala aplicadas ao modelo, com os eixos do mundo fixos. A Figura~\ref{fig:m2v} mostra as quatro vistas do observador e a comparação entre projeções. Na perspectiva, o tronco próximo à câmera aparece mais largo que os ramos distantes de mesmo raio; na ortográfica, a espessura aparente não depende da profundidade. As matrizes próprias foram comparadas elemento a elemento com \texttt{glOrtho}, \texttt{gluPerspective}, \texttt{gluLookAt} e \texttt{glRotatef}, coincidindo em todos os casos (tolerância $10^{-5}$).
+\subsection{Visibilidade}
+A Figura~\ref{fig:m2} usa o destaque das faces de trás em vermelho para separar os efeitos do Z-Buffer e do culling no modelo Nterm064. Com o Z-Buffer ligado (a), nenhuma face vermelha aparece, pois toda face de trás está atrás de uma face de frente do mesmo tubo. Sem Z-Buffer e sem culling (b), vale a ordem de desenho e as faces de trás pintadas por último aparecem por cima, em especial nas esferas das junções. Com o culling do OpenGL e sem Z-Buffer (c), o vermelho desaparece, mas a imagem continua errada: as esferas, desenhadas depois dos cilindros, cobrem os vasos, e vasos distantes aparecem sobre vasos próximos. Por fim, com o Z-Buffer e o culling próprio (d), a imagem é idêntica a (a), mas apenas 4\,546 dos 9\,192 triângulos (49,5\%) foram enviados ao rasterizador. O culling é, portanto, uma otimização, e não um substituto do Z-Buffer. A Figura~\ref{fig:m2}(e) mostra o conteúdo linearizado do Z-Buffer: o tronco, próximo à câmera, é mais escuro, e os ramos ao fundo, mais claros.
 
 \begin{figure}[H]
   \centering
-  \painel{0.24}{m2_original}{(a) original}\hfill
-  \painel{0.24}{m2_translacao}{(b) translação}\hfill
-  \painel{0.24}{m2_rotacao}{(c) rotação de $35^\circ$ em $z$}\hfill
-  \painel{0.24}{m2_escala}{(d) escala $0{,}6$}
-  \caption{Transformações geométricas aplicadas ao modelo. Os eixos do mundo (x em vermelho, y em verde) usam apenas a matriz de visão e permanecem fixos.}
-  \label{fig:m2t}
+  \painel{0.19}{m2_zbuffer_sem_culling}{(a) Z-Buffer}\hfill
+  \painel{0.19}{m2_sem_zbuffer_sem_culling}{(b) sem Z, sem culling}\hfill
+  \painel{0.19}{m2_sem_zbuffer_com_culling}{(c) sem Z, culling GL}\hfill
+  \painel{0.19}{m2_zbuffer_culling_proprio}{(d) Z + culling próprio}\hfill
+  \painel{0.19}{m2_profundidade}{(e) profundidade}
+  \caption{Visibilidade no modelo Nterm064 com as faces de trás destacadas em vermelho. (d) é idêntica a (a) desenhando 49,5\% dos triângulos; (e) mostra a profundidade linearizada (perto = escuro).}
+  \label{fig:m2}
 \end{figure}
+
+\subsection{Iluminação e sombreamento}
+Na Figura~\ref{fig:m3}, as linhas superiores comparam os três sombreamentos e as componentes do modelo de iluminação, de perto, para que as facetas fiquem visíveis. No Flat (a), cada um dos 12 lados dos cilindros tem uma cor uniforme e os tubos parecem prismas. No Gouraud (b), a transição entre os lados é suave. No Phong (c), o resultado é semelhante ao Gouraud nos vasos finos, em que cada triângulo cobre poucos pixels, e a diferença aparece no brilho especular dos vasos grossos: como os triângulos dos cilindros são longos e estreitos, o Gouraud interpola o brilho ao longo de todo o comprimento do triângulo, enquanto o Phong o calcula em cada pixel. Só com a componente ambiente (d), todos os pontos de um vaso têm a mesma cor e a forma cilíndrica desaparece; a difusa (e) revela o volume e a especular (f) acrescenta o brilho que indica a posição da luz. Na última linha, a mesma árvore iluminada pela esquerda (g) e pela direita (h) mostra como a luz pontual móvel desloca as regiões claras e escuras.
 
 \begin{figure}[H]
   \centering
-  \painel{0.155}{m2_vista_frontal}{(a) frontal}\hfill
-  \painel{0.155}{m2_vista_lateral}{(b) lateral}\hfill
-  \painel{0.155}{m2_vista_superior}{(c) superior}\hfill
-  \painel{0.155}{m2_vista_isometrica}{(d) isométrica}\hfill
-  \painel{0.155}{m2_perspectiva}{(e) perspectiva}\hfill
-  \painel{0.155}{m2_ortografica}{(f) ortográfica}
-  \caption{(a) a (d): quatro posições do observador para o modelo 3D Nterm256. (e) e (f): mesma câmera com projeção perspectiva e ortográfica (Nterm064).}
-  \label{fig:m2v}
+  \painel{0.32}{m3_flat}{(a) Flat}\hfill
+  \painel{0.32}{m3_gouraud}{(b) Gouraud}\hfill
+  \painel{0.32}{m3_phong}{(c) Phong}\\[0.2cm]
+  \painel{0.32}{m3_ambiente}{(d) só ambiente}\hfill
+  \painel{0.32}{m3_difusa}{(e) + difusa}\hfill
+  \painel{0.32}{m3_especular}{(f) + especular}\\[0.2cm]
+  \painel{0.32}{m3_luz_esquerda}{(g) luz à esquerda}\hspace{0.02\textwidth}
+  \painel{0.32}{m3_luz_direita}{(h) luz à direita}
+  \caption{Sombreamento (a--c), componentes de Blinn--Phong (d--f) e posição da luz pontual (g, h). Modelos Nterm064 (a--f) e Nterm128 (g, h).}
+  \label{fig:m3}
 \end{figure}
 
-\subsection{Rasterização de linhas e polígonos}
-A Tabela~\ref{tab:bresenham} traz o exemplo numérico do Bresenham para o segmento $(20,10)$--$(30,18)$, com $\Delta x = 10$ e $\Delta y = 8$. Nos passos com $p_k < 0$ (passos 2 e 7), $y$ é mantido no passo seguinte. Em 20\,000 segmentos aleatórios, a implementação sempre começou e terminou nas extremidades, gerou pixels 8-conexos e manteve todos a no máximo meio pixel da reta ideal; o DDA divergiu em cerca de 17\% dos casos, sempre em empates de arredondamento, que são igualmente válidos.
+\subsection{Transparência}
+A Figura~\ref{fig:m4} mostra o modelo Nterm128 com opacidades decrescentes. Com $\alpha = 0{,}3$, os vasos do interior da árvore e o contorno do domínio no plano tornam-se visíveis através dos ramos da frente, o que é útil para entender a estrutura em profundidade. Comparando (c) e (d), a ordenação muda a cor nas regiões em que vasos se sobrepõem: sem ordenação, um vaso desenhado depois de outro que está à sua frente é composto por cima, como se estivesse na frente. A diferença é sutil nesta árvore porque os vasos são finos e se sobrepõem em áreas pequenas. Com o culling próprio (e), cada tubo contribui com uma única camada, a face da frente, em vez de duas; os vasos ficam mais claros e uniformes, e o número de triângulos a ordenar cai de 18\,408 para 9\,105.
+
+\begin{figure}[H]
+  \centering
+  \painel{0.19}{m4_opaco}{(a) opaco}\hfill
+  \painel{0.19}{m4_alfa06_painter}{(b) $\alpha = 0{,}6$}\hfill
+  \painel{0.19}{m4_alfa03_painter}{(c) $\alpha = 0{,}3$, Painter}\hfill
+  \painel{0.19}{m4_alfa03_sem_ordem}{(d) $\alpha = 0{,}3$, sem ordem}\hfill
+  \painel{0.19}{m4_alfa03_painter_culling}{(e) (c) + culling}
+  \caption{Transparência com alpha blending no modelo Nterm128. (c) e (d) diferem apenas na ordem de composição dos triângulos.}
+  \label{fig:m4}
+\end{figure}
+
+\subsection{Textura}
+A Tabela~\ref{tab:bilinear} traz o exemplo numérico da filtragem no ponto $(u, v) = (0{,}245;\ 0{,}50)$, na fronteira entre quatro células do quadriculado. Com $n = 32$, $t = (7{,}34;\ 15{,}50)$ e os vizinhos são os texels $i \in \{7, 8\}$, $j \in \{15, 16\}$. O NEAREST devolve a cor clara de um único texel; a bilinear, com $f_y = 0{,}5$, devolve exatamente a média das duas cores, independentemente de $f_x$, porque os texels diagonais são iguais. A implementação em NumPy e o shader com \texttt{texelFetch} usam a mesma convenção de centros dos texels, e as imagens da bilinear própria e da bilinear do OpenGL na Figura~\ref{fig:m5} são visualmente indistinguíveis. Na vista superior ampliada, o NEAREST (c) mostra o contorno do domínio como uma escada de blocos, enquanto as duas bilineares (d, e) o suavizam.
 
 \begin{table}[H]
   \centering
   \small
-  \caption{Exemplo numérico do Bresenham de $(20,10)$ a $(30,18)$: $p_0 = 6$, $2\Delta y = 16$, $2\Delta y - 2\Delta x = -4$.}
-  \label{tab:bresenham}
-  \begin{tabular}{c|ccccccccccc}
+  \caption{Filtragem no ponto $(u, v) = (0{,}245;\ 0{,}50)$ da textura $32 \times 32$: $f_x = 0{,}34$, $f_y = 0{,}50$.}
+  \label{tab:bilinear}
+  \begin{tabular}{lll}
     \toprule
-    $k$ & 0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10 \\
-    $p_k$ & 6 & 2 & $-2$ & 14 & 10 & 6 & 2 & $-2$ & 14 & 10 & 6 \\
-    $x$ & 20 & 21 & 22 & 23 & 24 & 25 & 26 & 27 & 28 & 29 & 30 \\
-    $y$ & 10 & 11 & 12 & 12 & 13 & 14 & 15 & 16 & 16 & 17 & 18 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-Para o Scanline Fill, o polígono côncavo $(2,1), (12,3), (9,7), (12,11), (5,9), (2,11)$ gera, na linha $y = 10$, quatro interseções ($2{,}00$; $3{,}50$; $8{,}50$; $11{,}25$) e dois trechos, $[2..3]$ e $[9..11]$, correspondentes à reentrância. Comparado a um teste par-ímpar ponto a ponto em 400 polígonos aleatórios, não houve divergências. A Figura~\ref{fig:raster} mostra a árvore rasterizada, o exemplo numérico e o preenchimento de uma região de interesse.
-
-\begin{figure}[H]
-  \centering
-  \painel{0.24}{m3_arvore_bresenham}{(a) árvore, Bresenham}\hfill
-  \painel{0.24}{m3_segmento_bresenham}{(b) segmento da Tab.~\ref{tab:bresenham}}\hfill
-  \painel{0.24}{m4_scanline_animacao}{(c) Scanline em andamento}\hfill
-  \painel{0.24}{m4_scanline}{(d) Scanline completo}
-  \caption{Modo didático: (a) segmentos da árvore Nterm016 com a reta ideal sobreposta; (b) pixels do exemplo numérico; (c) e (d) região de interesse côncava preenchida por Scanline, com a linha de varredura em vermelho.}
-  \label{fig:raster}
-\end{figure}
-
-\subsection{Aliasing e antialiasing}
-A Figura~\ref{fig:aa} compara a mesma cena sem antialiasing e com SSAA $4\times$ (16 amostras por pixel), e o efeito do MSAA $4\times$ na borda de um tubo. No leque de linhas, a região central, em que as linhas ficam mais próximas que um pixel, vira um padrão quadriculado sem antialiasing e uma transição suave com SSAA.
-
-\begin{figure}[H]
-  \centering
-  \painel{0.3}{m5_ssaa_leque}{(a) leque: sem AA $\times$ SSAA $4\times$}\hfill
-  \painel{0.3}{m5_ssaa_arvore}{(b) árvore: sem AA $\times$ SSAA $4\times$}\hfill
-  \painel{0.18}{m5_msaa_off_zoom}{(c) sem MSAA}\hfill
-  \painel{0.18}{m5_msaa_on_zoom}{(d) MSAA $4\times$}
-  \caption{(a) e (b): supersampling próprio, com a metade esquerda serrilhada e a direita suavizada. (c) e (d): borda de um tubo no visualizador, ampliada $3\times$.}
-  \label{fig:aa}
-\end{figure}
-
-\subsection{Recorte de segmentos}
-A Tabela~\ref{tab:clip} mostra o recorte do segmento $(2,6)$--$(36,30)$ pela janela $[10,30] \times [10,25]$. O Cohen--Sutherland calcula a interseção $(7{,}67;\ 10)$, que ainda está fora da janela (código \texttt{0001}), e precisa de uma nova interseção. O Liang--Barsky calcula quatro razões $q/p$ e apenas os dois pontos finais. Ambos chegam a $(10;\ 11{,}65)$--$(28{,}92;\ 25)$. Em 100\,000 segmentos aleatórios em $[-3,3]^2$ com janela $[-1,1]^2$, os resultados foram idênticos (50\,810 recortados, 47\,910 rejeitados e 1\,280 aceitos inteiros). A Figura~\ref{fig:clip} mostra o recorte da árvore.
-
-\begin{table}[H]
-  \centering
-  \small
-  \caption{Recorte do segmento $(2,6)$--$(36,30)$ pela janela $[10,30] \times [10,25]$.}
-  \label{tab:clip}
-  \begin{tabular}{lll|lrrrr}
-    \toprule
-    \multicolumn{3}{c|}{\textbf{Cohen--Sutherland}} & \multicolumn{5}{c}{\textbf{Liang--Barsky}} \\
-    \textbf{Passo} & $P_0$ [código] & $P_1$ [código] & \textbf{Borda} & $p$ & $q$ & $t_0$ & $t_1$ \\
+    \textbf{Texel} & \textbf{Posição $(i, j)$} & \textbf{Cor RGB} \\
     \midrule
-    0 & $(2{,}00;\ 6{,}00)$ [0101] & $(36{,}00;\ 30{,}00)$ [1010] & esquerda & $-34$ & $-8$ & 0,2353 & 1,0000 \\
-    1 & $(7{,}67;\ 10{,}00)$ [0001] & $(36{,}00;\ 30{,}00)$ [1010] & direita & 34 & 28 & 0,2353 & 0,8235 \\
-    2 & $(10{,}00;\ 11{,}65)$ [0000] & $(36{,}00;\ 30{,}00)$ [1010] & baixo & $-24$ & $-4$ & 0,2353 & 0,8235 \\
-    3 & $(10{,}00;\ 11{,}65)$ [0000] & $(28{,}92;\ 25{,}00)$ [0000] & cima & 24 & 19 & 0,2353 & 0,7917 \\
+    $\vetor{c}_{00}$ & $(7, 15)$ & $(190, 198, 214)$ \\
+    $\vetor{c}_{10}$ & $(8, 15)$ & $(235, 235, 240)$ \\
+    $\vetor{c}_{01}$ & $(7, 16)$ & $(235, 235, 240)$ \\
+    $\vetor{c}_{11}$ & $(8, 16)$ & $(190, 198, 214)$ \\
+    \midrule
+    NEAREST & $(\lfloor 0{,}245 \cdot 32 \rfloor, \lfloor 0{,}5 \cdot 32 \rfloor) = (7, 16)$ & $(235, 235, 240)$ \\
+    bilinear & Equação~\eqref{eq:bilinear} & $(212{,}5;\ 216{,}5;\ 227{,}0)$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
 \begin{figure}[H]
   \centering
-  \painel{0.32}{m6_recorte_antes}{(a) antes}\hfill
-  \painel{0.32}{m6_recorte_depois}{(b) depois}\hfill
-  \painel{0.32}{m6_recorte_sobreposto}{(c) sobreposto}
-  \caption{Recorte dos segmentos da árvore Nterm032 pela janela em vermelho: 24 segmentos aceitos inteiros, 13 recortados e 26 rejeitados.}
-  \label{fig:clip}
+  \painel{0.19}{m5_plano}{(a) plano}\hfill
+  \painel{0.19}{m5_coordenadas_uv}{(b) coordenadas $(u, v)$}\hfill
+  \painel{0.19}{m5_nearest}{(c) NEAREST}\hfill
+  \painel{0.19}{m5_bilinear_opengl}{(d) bilinear OpenGL}\hfill
+  \painel{0.19}{m5_bilinear_propria}{(e) bilinear própria}
+  \caption{Plano de referência texturizado. (b) $u$ no canal vermelho e $v$ no verde. (c--e) vista superior ampliada com a árvore em linhas.}
+  \label{fig:m5}
 \end{figure}
 
-\subsection{Recorte de polígonos}
-No exemplo do Sutherland--Hodgman com o pentágono $(5,15), (20,3), (35,18), (22,32), (18,20)$ e a janela $[10,30] \times [10,25]$, o polígono passa de 5 para 6, 7, 8 e 9 vértices após cada aresta da janela. A Figura~\ref{fig:poly} mostra os dois casos que diferenciam os algoritmos. Na forma em U, cuja base fica fora da janela, o Sutherland--Hodgman devolve um polígono com uma ponte degenerada (em magenta), enquanto o Weiler--Atherton devolve dois polígonos (cores distintas). Com uma janela côncava em L, o Sutherland--Hodgman recorta pela interseção dos semiplanos das arestas e perde parte da região, enquanto o Weiler--Atherton produz o resultado correto. Em 600 pares de polígonos simples, côncavos e com casos degenerados, o Weiler--Atherton não apresentou divergências em 150\,000 pontos de teste.
+\subsection{Ray Casting}
+No exemplo numérico do \texttt{raycasting.py}, o cilindro de $(0,0,0)$ a $(0,0,10)$, com $r = 1$, é atingido pelo raio $\vetor{O} = (5, 0, 5)$, $\vetor{D} = (-1, 0, 0)$ em $t = 4$, no ponto $(1, 0, 5)$, como esperado. Deslocando o raio para $z = 12$, a projeção no eixo sai do intervalo $[0, 10]$ e não há interseção lateral; num vaso, essa região é coberta pela esfera da extremidade. Na Figura~\ref{fig:m6}, o clique sobre um vaso do Nterm128 selecionou o vaso 9 (geração 2, raio 0,893\,mm, comprimento 6,26\,mm, $t = 0{,}0202$), destacado em magenta. Como o vaso de menor $t$ é escolhido, um clique onde dois vasos se sobrepõem seleciona sempre o da frente.
 
 \begin{figure}[H]
   \centering
-  \painel{0.24}{m7_sh_u_depois}{(a) U, Sutherland--Hodgman}\hfill
-  \painel{0.24}{m7_wa_u_depois}{(b) U, Weiler--Atherton}\hfill
-  \painel{0.24}{m7_sh_l_concavo}{(c) janela em L, S--H}\hfill
-  \painel{0.24}{m7_wa_l_concavo}{(d) janela em L, W--A}
-  \caption{Recorte de polígonos. (a) ponte degenerada ligando as duas componentes; (b) duas componentes separadas; (c) resultado incorreto do Sutherland--Hodgman com janela côncava; (d) resultado correto do Weiler--Atherton.}
-  \label{fig:poly}
+  \painel{0.38}{m6_selecao}{}
+  \caption{Seleção por Ray Casting: o vaso atingido primeiro pelo raio do pixel clicado aparece em magenta, e suas informações, no topo da tela.}
+  \label{fig:m6}
+\end{figure}
+
+\subsection{Ray Tracing}
+A Figura~\ref{fig:m7} mostra os três modos do mini Ray Tracer em $640 \times 480$ e a Tabela~\ref{tab:raios}, o número de raios de cada tipo. No Ray Casting (a), os objetos estão iluminados e com brilho especular, mas parecem flutuar sobre o piso. Os raios de sombra (b) projetam a bifurcação e as esferas no piso, o que ancora os objetos e revela suas posições relativas. As reflexões (c) fazem a esfera espelhada refletir a bifurcação, o céu e o piso, e o piso refletir os objetos. Os raios de sombra são lançados apenas dos pixels que atingem algum objeto (os que vão para o céu não geram raios secundários), e no modo completo também dos pontos atingidos pelos raios refletidos, o que explica o aumento de 216\,228 para 260\,377 raios de sombra.
+
+\begin{figure}[H]
+  \centering
+  \painel{0.32}{m7_rt_modo1}{(a) Ray Casting}\hfill
+  \painel{0.32}{m7_rt_modo2}{(b) + sombras}\hfill
+  \painel{0.32}{m7_rt_modo3}{(c) Ray Tracing completo}
+  \caption{Mini Ray Tracer numa cena inspirada numa bifurcação CCO: (a) só raios primários; (b) raios de sombra; (c) raios de sombra e refletidos (profundidade 3).}
+  \label{fig:m7}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Raios traçados por modo ($640 \times 480$ pixels). Tempos medidos em NumPy, na máquina de desenvolvimento.}
+  \label{tab:raios}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    \textbf{Modo} & \textbf{Primários} & \textbf{Sombra} & \textbf{Refletidos} & \textbf{Total} & \textbf{Tempo (s)} \\
+    \midrule
+    1. Ray Casting          & 307\,200 & 0        & 0        & 307\,200 & 0,76 \\
+    2. + sombras            & 307\,200 & 216\,228 & 0        & 523\,428 & 0,75 \\
+    3. Ray Tracing completo & 307\,200 & 260\,377 & 225\,348 & 792\,925 & 1,36 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Recurso adicional: métricas e filtro por raio}
+A Tabela~\ref{tab:metricas} traz as métricas dos modelos 3D. Em todos, há $N_{\text{term}} - 1$ bifurcações e $N_{\text{term}}$ terminais, como numa árvore binária, e a geração máxima cresce com o tamanho, de 8 a 33. A razão $r_p^3/(r_{f_1}^3 + r_{f_2}^3)$ é exatamente 1 em todas as bifurcações, o que confirma que os modelos foram gerados com a lei de Murray com expoente 3. O comprimento total cresce de forma sublinear, de 380 a 3\,168\,mm quando $N_{\text{term}}$ é multiplicado por 32, enquanto o volume cresce bem menos, pois os vasos novos são cada vez mais finos.
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{Métricas dos modelos 3D calculadas por \texttt{metricas.py} e número de triângulos dos tubos.}
+  \label{tab:metricas}
+  \begin{tabular}{lrrrrrrr}
+    \toprule
+    \textbf{Modelo} & \textbf{Bifurc.} & \textbf{Term.} & \textbf{Ger. máx.} & \textbf{Compr. (mm)} & \textbf{Vol. (mm$^3$)} & $r_p^3/\sum r_f^3$ & \textbf{Triângulos} \\
+    \midrule
+    Nterm016 & 15  & 16  & 8  & 379,6    & 132,1 & 1,000 & 2\,280 \\
+    Nterm032 & 31  & 32  & 11 & 596,9    & 217,8 & 1,000 & 4\,584 \\
+    Nterm064 & 63  & 64  & 15 & 916,9    & 352,8 & 1,000 & 9\,192 \\
+    Nterm128 & 127 & 128 & 19 & 1\,378,1 & 547,7 & 1,000 & 18\,408 \\
+    Nterm256 & 255 & 256 & 27 & 2\,090,1 & 610,9 & 1,000 & 36\,840 \\
+    Nterm512 & 511 & 512 & 33 & 3\,168,0 & 671,5 & 1,000 & 73\,704 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+A Figura~\ref{fig:m8} aplica o filtro ao Nterm256. Os 128 vasos mais grossos (raio $\ge 0{,}320$\,mm, o quartil superior) formam o esqueleto da árvore (b): são 25\% dos vasos e 18,5\% do comprimento, mas 57,3\% do volume (350,3 de 610,9\,mm$^3$). Os 205 vasos mais finos (c), ao contrário, somam 44,8\% do comprimento e apenas 17,2\% do volume, e aparecem espalhados por todo o domínio, como esperado para os ramos terminais que fazem a perfusão. Em (c), a transparência com culling próprio deixa ver o contorno do domínio sob os vasos.
+
+\begin{figure}[H]
+  \centering
+  \painel{0.32}{m8_completo}{(a) árvore completa}\hfill
+  \painel{0.32}{m8_grossos}{(b) 25\% mais grossos}\hfill
+  \painel{0.32}{m8_finos}{(c) 40\% mais finos}
+  \caption{Filtro por intervalo de raio no modelo Nterm256, com o painel de métricas da árvore e do subconjunto filtrado.}
+  \label{fig:m8}
 \end{figure}
 
 % ======================================================================
 \section{Discussão}
 
-\textbf{Comparação entre algoritmos de recorte de segmentos.} O Liang--Barsky evita interseções desperdiçadas e calcula apenas os pontos finais, enquanto o Cohen--Sutherland pode calcular interseções ainda externas, como no exemplo da Tabela~\ref{tab:clip}. Em compensação, a rejeição trivial do Cohen--Sutherland custa apenas operações sobre bits. No experimento com 100\,000 segmentos, em que quase metade foi rejeitada trivialmente, o Cohen--Sutherland foi mais rápido em Python (cerca de 0,7\,$\mu$s contra 1,1\,$\mu$s por segmento). A vantagem relativa depende, portanto, da proporção de segmentos totalmente fora da janela. O Cyrus--Beck seria necessário apenas para janelas convexas não retangulares.
+\textbf{Culling e Z-Buffer.} Os experimentos da Figura~\ref{fig:m2} mostram papéis distintos. O culling remove faces de trás \emph{de um mesmo objeto fechado} e reduz o trabalho do rasterizador pela metade, mas não decide qual de dois vasos está na frente; o Z-Buffer decide isso pixel a pixel, independentemente da ordem de desenho, ao custo de memória e de um teste por fragmento. O culling próprio e o do OpenGL produzem o mesmo resultado, por critérios diferentes: o próprio usa a geometria (normal e posição) antes da projeção; o do OpenGL, a ordem dos vértices depois dela, e por isso depende da orientação consistente das faces, garantida em \texttt{geometria.py}. Em compensação, o culling próprio custa uma operação vetorial em NumPy e o reenvio do \emph{element buffer} a cada quadro, enquanto o do OpenGL é feito em hardware sem custo perceptível. O valor do próprio é didático e de controle: permite contar os triângulos descartados, informação que o OpenGL não fornece.
 
-\textbf{Sutherland--Hodgman e Weiler--Atherton.} O Sutherland--Hodgman é simples e eficiente, e o resultado preenchido por Scanline fica correto mesmo com pontes, porque elas têm área nula e ficam sobre linhas horizontais ou verticais. Porém o contorno exibe arestas espúrias e a saída não representa componentes separadas, o que é inadequado quando o resultado alimenta outras etapas. O Weiler--Atherton resolve esses casos e aceita janelas côncavas, ao custo de estruturas de dados mais complexas e de tratamento explícito de casos degenerados.
+\textbf{Sombreamento.} O custo cresce do Flat (uma avaliação por triângulo) ao Phong (uma por pixel). Com 12 lados por cilindro, a diferença entre Gouraud e Phong é pequena nos vasos finos e visível no brilho dos grossos. Para esta aplicação, o Phong é a melhor escolha: o custo extra é absorvido pela GPU e o brilho especular, que indica a curvatura dos tubos, fica correto. O Flat é útil apenas para evidenciar a malha.
 
-\textbf{Decisões de implementação.} A espessura foi modelada como geometria (faixas e tubos) e não com \texttt{glLineWidth}, que é limitado pelo hardware e aplica uma única largura por chamada. Os vértices são enviados uma única vez para a GPU em VBOs, pois o modelo Nterm512 gera 90\,088 triângulos. O MSAA foi feito por FBO porque o servidor gráfico do WSL não ofereceu janela multiamostrada.
+\textbf{Painter's Algorithm.} A ordenação pelo centroide é simples, mas falha onde triângulos se interpenetram, o que ocorre nas junções, em que esferas e cilindros se cruzam. Além disso, a ordenação de $O(T \log T)$ é refeita a cada quadro em Python; com o Nterm512 (73\,704 triângulos) a rotação fica lenta na renderização por software. Técnicas como \emph{depth peeling} ou transparência independente de ordem (OIT) resolveriam os casos de interpenetração; uma otimização simples seria reordenar apenas quando a câmera muda.
 
-\textbf{Limitações.} No ambiente de desenvolvimento (WSL com renderização por software), o modelo Nterm512 em tubos fica com taxa de quadros baixa durante a rotação. A iluminação dos tubos é da API. O deslocamento da janela no Weiler--Atherton resolve os casos degenerados encontrados, mas é uma solução numérica, não simbólica. O SSAA usa filtro caixa, que é o mais simples; filtros com pesos (como o gaussiano) suavizariam melhor.
+\textbf{Rasterização e Ray Tracing.} A rasterização com Z-Buffer desenha dezenas de milhares de triângulos em tempo interativo, mas sombras e reflexões exigiriam passes extras (\emph{shadow mapping}, mapas de ambiente). No Ray Tracing elas surgem do próprio algoritmo, e as superfícies são exatas (cilindros e esferas analíticos, sem facetas), mas o custo é proporcional a pixels $\times$ objetos $\times$ raios por pixel: a cena simplificada, com 9 objetos, leva cerca de 1,4\,s por quadro em NumPy. Aplicar o mesmo traçador à árvore completa exigiria uma estrutura de aceleração, como uma hierarquia de volumes envolventes (BVH), que reduziria o teste de $O(N)$ para cerca de $O(\log N)$ objetos por raio. O mesmo vale para a seleção por Ray Casting, que hoje testa todos os vasos, mas, por ser um único raio vetorizado, leva cerca de 0,6\,ms mesmo no Nterm512 (1\,023 vasos).
+
+\textbf{Limitações.} O mini Ray Tracer usa uma cena simplificada, sem antialiasing e com uma única luz. A transparência por Painter's Algorithm não trata interpenetrações. A janela tem tamanho fixo. No ambiente de desenvolvimento (WSL com Mesa llvmpipe), o modelo Nterm512 em tubos com transparência ordenada fica com taxa de quadros baixa.
 
 % ======================================================================
 \section{Conclusão}
 
-O trabalho cumpriu os objetivos do TP1: os modelos CCO 2D e 3D foram lidos e representados por linhas, faixas e tubos codificados por cor e espessura; as transformações, as vistas e as projeções foram implementadas com matrizes próprias; e os algoritmos de rasterização, preenchimento, antialiasing e recorte foram implementados, validados e comparados, incluindo o Weiler--Atherton como diferencial. A separação entre o visualizador e o modo didático permitiu demonstrar cada algoritmo pixel a pixel sem depender da biblioteca. Como continuidade, o TP2 deve incorporar visibilidade, iluminação própria, transparência, textura e técnicas baseadas em raios sobre essa mesma base.
+O trabalho cumpriu os objetivos do TP2: o visualizador do TP1 passou a usar um pipeline programável com shaders próprios, em que as equações de iluminação e os três modelos de sombreamento são código da autora; a visibilidade foi estudada com Back-Face Culling próprio e do OpenGL e com a visualização do Z-Buffer; a transparência foi implementada com Painter's Algorithm; a textura, com filtragem bilinear própria validada por um exemplo numérico; e as técnicas baseadas em raios foram usadas tanto na interação (seleção de vasos por Ray Casting) quanto na síntese de imagens (mini Ray Tracer com sombras e reflexões). O recurso adicional de métricas e filtro por raio mostrou, por exemplo, que um quarto dos vasos concentra mais da metade do volume da árvore. Como trabalhos futuros, destacam-se aplicar o Ray Tracer à árvore completa com uma BVH, adotar uma técnica de transparência independente de ordem e acrescentar sombras ao visualizador por \emph{shadow mapping}.
 
 % --- REFERÊNCIAS BIBLIOGRÁFICAS ---
 \begin{thebibliography}{99}
   \bibitem{schreiner1993} SCHREINER, W.; BUXBAUM, P. F. Computer-optimization of vascular trees. \textbf{IEEE Transactions on Biomedical Engineering}, v. 40, n. 5, p. 482--491, 1993.
   \bibitem{foley1990} FOLEY, J. D.; VAN DAM, A.; FEINER, S. K.; HUGHES, J. F. \textbf{Computer Graphics: Principles and Practice}. 2. ed. Reading: Addison-Wesley, 1990.
-  \bibitem{hearn1997} HEARN, D.; BAKER, M. P. \textbf{Computer Graphics, C Version}. 2. ed. Upper Saddle River: Prentice Hall, 1997.
-  \bibitem{bresenham1965} BRESENHAM, J. E. Algorithm for computer control of a digital plotter. \textbf{IBM Systems Journal}, v. 4, n. 1, p. 25--30, 1965.
-  \bibitem{newman1979} NEWMAN, W. M.; SPROULL, R. F. \textbf{Principles of Interactive Computer Graphics}. 2. ed. New York: McGraw-Hill, 1979.
-  \bibitem{liang1984} LIANG, Y.-D.; BARSKY, B. A. A new concept and method for line clipping. \textbf{ACM Transactions on Graphics}, v. 3, n. 1, p. 1--22, 1984.
-  \bibitem{cyrus1978} CYRUS, M.; BECK, J. Generalized two- and three-dimensional clipping. \textbf{Computers \& Graphics}, v. 3, n. 1, p. 23--28, 1978.
-  \bibitem{sutherland1974} SUTHERLAND, I. E.; HODGMAN, G. W. Reentrant polygon clipping. \textbf{Communications of the ACM}, v. 17, n. 1, p. 32--42, 1974.
-  \bibitem{weiler1977} WEILER, K.; ATHERTON, P. Hidden surface removal using polygon area sorting. \textbf{ACM SIGGRAPH Computer Graphics}, v. 11, n. 2, p. 214--222, 1977.
-  \bibitem{borland2007} BORLAND, D.; TAYLOR II, R. M. Rainbow color map (still) considered harmful. \textbf{IEEE Computer Graphics and Applications}, v. 27, n. 2, p. 14--17, 2007.
+  \bibitem{catmull1974} CATMULL, E. \textbf{A Subdivision Algorithm for Computer Display of Curved Surfaces}. Tese (Doutorado) -- University of Utah, Salt Lake City, 1974.
+  \bibitem{phong1975} PHONG, B. T. Illumination for computer generated pictures. \textbf{Communications of the ACM}, v. 18, n. 6, p. 311--317, 1975.
+  \bibitem{blinn1977} BLINN, J. F. Models of light reflection for computer synthesized pictures. \textbf{ACM SIGGRAPH Computer Graphics}, v. 11, n. 2, p. 192--198, 1977.
+  \bibitem{gouraud1971} GOURAUD, H. Continuous shading of curved surfaces. \textbf{IEEE Transactions on Computers}, v. C-20, n. 6, p. 623--629, 1971.
+  \bibitem{newell1972} NEWELL, M. E.; NEWELL, R. G.; SANCHA, T. L. A solution to the hidden surface problem. In: \textbf{Proceedings of the ACM Annual Conference}, p. 443--450, 1972.
+  \bibitem{appel1968} APPEL, A. Some techniques for shading machine renderings of solids. In: \textbf{Proceedings of the AFIPS Spring Joint Computer Conference}, p. 37--45, 1968.
+  \bibitem{whitted1980} WHITTED, T. An improved illumination model for shaded display. \textbf{Communications of the ACM}, v. 23, n. 6, p. 343--349, 1980.
+  \bibitem{murray1926} MURRAY, C. D. The physiological principle of minimum work: I. The vascular system and the cost of blood volume. \textbf{Proceedings of the National Academy of Sciences}, v. 12, n. 3, p. 207--214, 1926.
 \end{thebibliography}
 
 \end{document}
