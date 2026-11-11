@@ -1,7 +1,9 @@
-# TP1 · Visualização Geométrica, Rasterização e Recorte de Árvores Arteriais CCO
+# TP2 · Visualização 3D Avançada de Árvores CCO: Visibilidade, Iluminação e Técnicas Baseadas em Raios
 
 **BCC327 – Computação Gráfica · UFOP · 2026.2**
 Prof. Dr. Rafael Alves Bonfim de Queiroz
+
+> Este README descreve o TP2, desenvolvido na branch `tp2`. O TP1 permanece na branch `main`.
 
 ## Integrantes
 
@@ -11,10 +13,10 @@ Prof. Dr. Rafael Alves Bonfim de Queiroz
 
 ## Visão geral
 
-A aplicação é formada por dois programas que compartilham os mesmos módulos:
+O TP2 evolui o visualizador do TP1 para uma aplicação de visualização científica 3D:
 
-- **Visualizador CCO** (`src/visualizador.py`): carrega os modelos 2D e 3D, desenha a árvore como linhas, faixas ou tubos coloridos pelo raio, aplica translação, rotação e escala, alterna vistas do observador e projeções ortográfica e perspectiva, e liga/desliga o MSAA.
-- **Modo didático** (`src/modo_didatico.py`): um framebuffer de 80 x 60 pixels ampliados em que **apenas os algoritmos do grupo escrevem**. Demonstra Bresenham/DDA, Scanline Fill, supersampling, Cohen–Sutherland, Liang–Barsky, Sutherland–Hodgman e Weiler–Atherton.
+- **Visualizador CCO** (`src/visualizador.py`): tubos 3D com espessura proporcional ao raio, câmera e vistas com matrizes próprias, Back-Face Culling (próprio e do OpenGL), Z-Buffer com visualização da profundidade, sombreamento Flat / Gouraud / Phong em shaders GLSL próprios, luz pontual configurável, transparência com Painter's Algorithm, plano de referência com textura e filtragem bilinear própria, seleção de vasos por Ray Casting, filtro por intervalo de raio e painel de métricas da árvore.
+- **Mini Ray Tracer** (`src/raytracer.py`): ray tracer em NumPy com raios primários, sombras e reflexões, comparando Ray Casting e Ray Tracing numa cena inspirada numa bifurcação CCO. Abre sozinho ou pela tecla `Y` do visualizador.
 
 ## Tecnologia e dependências
 
@@ -24,7 +26,7 @@ A aplicação é formada por dois programas que compartilham os mesmos módulos:
 | pygame-ce | 2.5.2 |
 | PyOpenGL | 3.1.7 |
 | NumPy | 2.1.3 |
-| OpenGL | 2.1 ou superior (perfil de compatibilidade); testado com Mesa 23 (llvmpipe, OpenGL 4.5) |
+| OpenGL | 3.3 ou superior (perfil de compatibilidade) e GLSL 3.30; testado com Mesa (llvmpipe, OpenGL 4.5) |
 
 As versões estão fixadas em `requirements.txt`.
 
@@ -49,101 +51,88 @@ pip install -r requirements.txt
 
 ## Arquivos VTK
 
-Os 12 modelos fornecidos pelo professor já estão em `data/`:
-
-```
-data/tree2D_Nterm008.vtk ... data/tree2D_Nterm256.vtk   (modelos 2D)
-data/tree3D_Nterm016.vtk ... data/tree3D_Nterm512.vtk   (modelos 3D)
-```
-
-Os comandos abaixo devem ser executados a partir da **raiz do repositório**, para que os caminhos `data/...` e `report/figures/` funcionem.
+Os 12 modelos fornecidos pelo professor estão em `data/` (`tree2D_Nterm008.vtk` a `tree2D_Nterm256.vtk` e `tree3D_Nterm016.vtk` a `tree3D_Nterm512.vtk`). Para o TP2 recomenda-se os modelos 3D. Os comandos devem ser executados a partir da **raiz do repositório**.
 
 ## Execução
 
 ```bash
-python src/visualizador.py                              # padrão: tree2D_Nterm064
-python src/visualizador.py data/tree3D_Nterm256.vtk     # qualquer modelo 2D ou 3D
-
-python src/modo_didatico.py                             # padrão: tree2D_Nterm016
-python src/modo_didatico.py data/tree2D_Nterm032.vtk    # qualquer modelo 2D
+python src/visualizador.py                              # padrão: tree3D_Nterm064
+python src/visualizador.py data/tree3D_Nterm256.vtk     # qualquer modelo
+python src/raytracer.py                                 # mini Ray Tracer (ou tecla Y no visualizador)
 ```
 
 Programas de linha de comando (exemplos numéricos usados no relatório):
 
 ```bash
-python src/leitor_vtk.py data/*.vtk          # pontos, segmentos e raio mín./máx. de cada modelo
-python src/transformacoes.py                 # testes das matrizes (ordem das transformações, projeções)
-python src/rasterizacao.py                   # tabela passo a passo do Bresenham (20,10)-(30,18)
-python src/rasterizacao.py 0 0 7 3           # Bresenham de um segmento qualquer
-python src/rasterizacao.py scanline          # tabela linha a linha do Scanline Fill
-python src/recorte.py                        # rastro de Cohen–Sutherland e Liang–Barsky + comparação
-python src/recorte.py poligono               # rastro de Sutherland–Hodgman e Weiler–Atherton
-```
-
-Todas as figuras do relatório e da apresentação podem ser regeradas com um único comando (uma janela OpenGL abre por alguns segundos):
-
-```bash
-python src/gerar_figuras.py                  # 36 figuras em report/figures/
+python src/metricas.py data/tree3D_*.vtk     # bifurcações, terminais, gerações, comprimento, volume
+python src/raycasting.py                     # exemplo de interseção raio-cilindro
+python src/textura.py                        # exemplo de NEAREST x bilinear num ponto (u, v)
+python src/gerar_figuras.py                  # regera as 34 figuras em report/figures/
 ```
 
 ## Comandos do visualizador
 
+### Navegação e representação
+
 | Entrada | Ação |
 |---|---|
 | Arrastar (botão esquerdo) | Rotação em torno de x e y |
-| Roda do mouse | Zoom (aproxima/afasta a câmera) |
+| Roda do mouse | Zoom |
 | `Z` / `X` | Rotação em torno de z |
-| Setas | Translação em x e y |
-| `PageUp` / `PageDown` | Translação em z |
-| `,` / `.` | Escala (diminui/aumenta) |
+| Setas, `PageUp` / `PageDown` | Translação |
+| `,` / `.` | Escala |
 | `1` `2` `3` `4` | Vista frontal / lateral / superior / isométrica |
-| `P` | Projeção ortográfica / perspectiva |
-| `A` | Mostra/esconde os eixos do mundo |
-| `R` | Restaura transformações e vista |
-| `E` | Representação: linhas + cor / espessura + cor / espessura sólida |
-| `C` | Mapa de cores: jet / viridis |
+| `P` | Projeção perspectiva / ortográfica |
+| `A` | Eixos do mundo |
+| `R` | Restaura transformações, vista e luz |
+| `E` | Linhas / tubos coloridos / tubos sólidos |
+| `C` | Mapa de cores jet / viridis |
 | `+` / `-` | Exagero da espessura |
-| `M` | Liga/desliga o MSAA 4x |
-| `S` | Salva a tela atual em `report/figures/` |
+| `M` | MSAA 4x |
+| `S` | Salva a tela em `report/figures/` |
 | `ESC` | Sai |
 
-## Comandos do modo didático
+### Técnicas do TP2
+
+| Entrada | Ação |
+|---|---|
+| `B` | Back-Face Culling: desligado / OpenGL / próprio (N · V) |
+| `D` | Liga/desliga o Z-Buffer |
+| `V` | Mostra o conteúdo do Z-Buffer em tons de cinza |
+| `F` | Pinta de vermelho as faces de trás |
+| `G` | Sombreamento Flat / Gouraud / Phong |
+| `K` | Componentes: só ambiente / + difusa / + especular |
+| `L` | Modo luz: setas e `PageUp`/`PageDown` movem a luz, `+`/`-` mudam a intensidade (`L` de novo sai) |
+| `O` | Opacidade 1,0 / 0,6 / 0,3 |
+| `N` | Ordem dos transparentes: Painter's / sem ordenação |
+| `T` | Plano de referência com textura |
+| `U` | Filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / coordenadas (u, v) |
+| Clique direito | Seleciona o vaso por Ray Casting (mostra geração, raio e comprimento) |
+| `Y` | Abre o mini Ray Tracer |
+| `I` | Modo intervalo: `←`/`→` mudam o raio mínimo, `↓`/`↑` o máximo (`I` de novo sai) |
+| `J` | Painel de métricas da árvore |
+
+### Mini Ray Tracer
 
 | Tecla | Ação |
 |---|---|
-| `1` | Árvore rasterizada (Bresenham ou DDA) |
-| `2` | Segmento livre: clique em dois pixels; a tabela do Bresenham sai no terminal |
-| `3` | Polígono preenchido com Scanline Fill |
-| `4` | Antialiasing: mesma cena sem AA (esquerda) e com SSAA (direita) |
-| `5` | Recorte de segmentos da árvore |
-| `6` | Recorte de polígonos |
-| `B` | (1, 2) Algoritmo de segmentos: Bresenham / DDA |
-| `L` | (1, 2) Mostra/esconde a reta ideal |
-| `N`, `Enter` | (3) Novo polígono: clique nos vértices e feche com Enter |
-| `Espaço` | (3) Anima o preenchimento linha a linha |
-| `K` | (4) Fator de supersampling: 2 / 4 / 8 |
-| `T` | (4) Cena: leque de linhas / árvore CCO |
-| Arrastar | (5, 6) Desenha uma nova janela de recorte |
-| `G` | (5) Cohen–Sutherland / Liang–Barsky |
-| `W` | (6) Sutherland–Hodgman / Weiler–Atherton |
-| `P` | (6) Sujeito: região de interesse / forma em U |
-| `J` | (6) Janela: retângulo / hexágono / L côncavo |
-| `V` | (5, 6) Vista: sobreposto / antes / depois |
-| `I` | (5, 6) Imprime no terminal a tabela do recorte |
-| `S` | Salva a tela atual em `report/figures/` |
+| `1` / `2` / `3` | Ray Casting / + sombras / Ray Tracing completo (+ reflexões) |
+| `S` | Salva em `report/figures/rt_modo<n>.png` |
 | `ESC` | Sai |
 
 ## Roteiro mínimo de teste
 
-1. **Leitura:** `python src/leitor_vtk.py data/*.vtk`. Cada modelo deve ter `pontos = 2 x Nterm` e `segmentos = pontos - 1`.
-2. **Primitivas e cores:** `python src/visualizador.py`. Aperte `E` duas vezes (linhas, faixas, sólido) e `C` (jet, viridis).
-3. **Transformações e observador:** `python src/visualizador.py data/tree3D_Nterm256.vtk`. Arraste com o mouse, use setas, `Z`, `,` e `.`; os eixos do mundo (`A`) ficam parados. Teste as vistas `1` a `4` e alterne `P` com a câmera próxima.
-4. **Tubos e MSAA:** no mesmo modelo, `E` para tubos, `4` para a vista isométrica, aproxime e alterne `M`.
-5. **Bresenham:** `python src/modo_didatico.py`, tecla `1`, depois `2` e clique em dois pixels.
-6. **Scanline:** tecla `3`, depois `Espaço`.
-7. **Antialiasing:** tecla `4`, depois `K` e `T`.
-8. **Recorte de segmentos:** tecla `5`, arraste uma janela, alterne `V` e `G`.
-9. **Recorte de polígonos:** tecla `6`, `P` (forma em U), `V` até "depois" e alterne `W`; depois `J` até "L côncavo" e alterne `W`.
+Segue o roteiro de integração do enunciado:
+
+1. **Carregar uma árvore:** `python src/visualizador.py data/tree3D_Nterm128.vtk`.
+2. **Navegar:** arrastar, roda do mouse, vistas `1` a `4`.
+3. **Visibilidade:** `F` (faces de trás em vermelho), `D` (desliga o Z-Buffer: aparece o vermelho), `B` até "próprio" (o vermelho some; o rodapé mostra quantos triângulos foram desenhados), `D` de novo, `V` (profundidade).
+4. **Iluminação:** `G` (Flat, Gouraud, Phong), `K` (componentes), `L` e setas (move a luz), `+`/`-` (intensidade), `L` para sair.
+5. **Transparência:** `O` até 0,3; `N` alterna Painter's e sem ordenação.
+6. **Textura:** `E` até "linhas", `3` (vista superior), aproximar e alternar `U`.
+7. **Ray Casting:** `E` de volta aos tubos, clique direito num vaso.
+8. **Ray Tracing:** `Y`, e na janela nova `1`, `2`, `3`.
+9. **Recurso adicional:** `I`, setas para filtrar por raio, `J` para o painel de métricas.
 
 ## O que foi implementado pelo grupo e o que vem de bibliotecas
 
@@ -151,55 +140,42 @@ python src/gerar_figuras.py                  # 36 figuras em report/figures/
 
 | Funcionalidade | Arquivo |
 |---|---|
-| Leitor de VTK legado ASCII (POINTS, LINES, CELL_DATA) | `leitor_vtk.py` |
-| Mapas de cores contínuos jet e viridis (interpolação linear) | `cores.py` |
-| Geometria das faixas 2D (retângulos + discos) e dos tubos 3D (cilindros + esferas, com normais) | `geometria.py` |
-| Matrizes de translação, rotação, escala, câmera (look-at), projeção ortográfica e perspectiva | `transformacoes.py` |
-| Rasterização de segmentos: Bresenham (8 octantes) e DDA | `rasterizacao.py` |
-| Preenchimento de polígonos: Scanline Fill com tabela de arestas e arestas ativas | `rasterizacao.py` |
-| Supersampling (SSAA) com filtro caixa | `antialiasing.py` |
-| Recorte de segmentos: Cohen–Sutherland e Liang–Barsky | `recorte.py` |
-| Recorte de polígonos: Sutherland–Hodgman (janela convexa) e Weiler–Atherton (diferencial) | `recorte.py` |
-| Framebuffer do modo didático e todas as interações | `modo_didatico.py` |
+| Leitor de VTK legado ASCII | `leitor_vtk.py` |
+| Tubos 3D (cilindros + esferas), normais, orientação anti-horária das faces, normais de face | `geometria.py` |
+| Matrizes de modelo, câmera e projeção; matriz das normais | `transformacoes.py`, `shaders.py` |
+| Iluminação de Blinn-Phong e os sombreamentos Flat, Gouraud e Phong (shaders GLSL) | `shaders.py` |
+| Back-Face Culling próprio pelo critério N · V | `visualizador.py` |
+| Leitura e linearização do Z-Buffer para visualização | `visualizador.py` |
+| Painter's Algorithm (ordenação dos triângulos por profundidade) | `visualizador.py` |
+| Geração da textura, coordenadas (u, v), filtragem bilinear própria (GLSL e NumPy) | `textura.py`, `shaders.py` |
+| Ray Casting: raio pela inversa de P · V, interseção raio-cilindro e raio-esfera | `raycasting.py` |
+| Mini Ray Tracer: raios primários, de sombra e refletidos, interseções e sombreamento | `raytracer.py` |
+| Métricas da árvore (grafo, BFS, gerações, comprimento, volume, bifurcações) e filtro por raio | `metricas.py`, `visualizador.py` |
 
 ### Realizado com auxílio de bibliotecas
 
 | Funcionalidade | Biblioteca |
 |---|---|
-| Janela, teclado, mouse e texto na tela | pygame-ce |
-| Rasterização final dos triângulos e linhas no visualizador, teste de profundidade | OpenGL (via PyOpenGL), alimentado com as matrizes e a geometria do grupo |
-| Iluminação dos tubos (luz direcional + ambiente, pipeline fixo) | OpenGL |
-| MSAA (framebuffer multiamostrado e `glBlitFramebuffer`) | OpenGL |
-| Envio dos vértices para a GPU (VBOs) | OpenGL |
+| Janela, teclado, mouse e texto | pygame-ce |
+| Compilação e execução dos shaders, rasterização dos triângulos, interpolação dos atributos | OpenGL |
+| Teste de profundidade (Z-Buffer) e Back-Face Culling por ordem dos vértices (modo "OpenGL") | OpenGL |
+| Composição alfa (`glBlendFunc`) | OpenGL |
+| Amostragem de textura NEAREST e bilinear (modos "NEAREST" e "bilinear (OpenGL)") | OpenGL |
+| MSAA (framebuffer multiamostrado) e VBOs | OpenGL |
 | Operações vetoriais e de matrizes | NumPy |
-| Ampliação do framebuffer didático e linha antisserrilhada da "reta ideal" (apenas referência visual) | pygame-ce |
-
-Nenhum pixel do modo didático é gerado pela biblioteca: o pygame-ce apenas amplia a matriz NumPy preenchida pelos algoritmos do grupo.
-
-## Observações
-
-- No WSL, se o visualizador ficar lento com os modelos maiores em tubos, é possível tentar usar a GPU com `GALLIUM_DRIVER=d3d12 python src/visualizador.py ...`.
-- O raio nos arquivos VTK está em mm e as coordenadas em m; a espessura desenhada é `raio x 0,001 x exagero` (exagero padrão 2x).
 
 ## Estrutura
 
 ```
 .
 ├── src/
-│   ├── leitor_vtk.py
-│   ├── cores.py
-│   ├── geometria.py
-│   ├── transformacoes.py
-│   ├── rasterizacao.py
-│   ├── antialiasing.py
-│   ├── recorte.py
-│   ├── visualizador.py
-│   ├── modo_didatico.py
-│   └── gerar_figuras.py
-├── data/            modelos VTK
-├── report/          relatório (LaTeX) e figuras
-├── presentation/    apresentação (Beamer) e figuras
-├── demo/            GIF de demonstração (opcional)
+│   ├── leitor_vtk.py      cores.py        geometria.py     transformacoes.py
+│   ├── shaders.py         textura.py      raycasting.py    raytracer.py
+│   ├── metricas.py        visualizador.py gerar_figuras.py
+│   └── (TP1) rasterizacao.py  antialiasing.py  recorte.py  modo_didatico.py
+├── data/              modelos VTK
+├── report/            relatório (LaTeX) e figuras
+├── presentation/      apresentação (Beamer) e figuras
 ├── requirements.txt
 └── README.md
 ```
