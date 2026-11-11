@@ -2,9 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 6: seleção de vasos por Ray Casting (clique direito), plano
-com textura, transparência com Painter's Algorithm, Back-Face Culling,
-Z-Buffer, sombreamento Flat / Gouraud / Phong e luz pontual móvel.
+TP2, versão 7: filtro por intervalo de raio e painel de métricas, seleção
+de vasos por Ray Casting, plano com textura, transparência com Painter's
+Algorithm, Back-Face Culling, Z-Buffer, Flat / Gouraud / Phong e luz pontual.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -37,6 +37,9 @@ Teclas e mouse:
     T                      mostra / esconde o plano de referência com textura
     U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
     Y                      abre o mini Ray Tracer (raytracer.py) em outra janela
+    I                      modo intervalo: setas esquerda/direita mudam o raio mínimo
+                           e baixo/cima o raio máximo exibido (I de novo volta ao normal)
+    J                      mostra / esconde o painel de métricas da árvore
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -58,6 +61,7 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import metricas
 import raycasting
 import shaders
 import transformacoes as T
@@ -77,7 +81,7 @@ LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mu
 PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
 CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
 OPACIDADES = [1.0, 0.6, 0.3]
-ORDENS = ["Painter's (trás → frente)", "sem ordenação"]
+ORDENS = ["Painter's (trás -> frente)", "sem ordenação"]
 FILTROS = ["NEAREST", "bilinear (OpenGL)", "bilinear (própria)", "coordenadas (u, v)"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
@@ -119,6 +123,11 @@ class Estado:
         self.selecionado = None         # índice do vaso escolhido por Ray Casting
         self.t_selecao = None
         self.ponto_selecao = None       # ponto de impacto no espaço do mundo
+        self.modo_intervalo = False
+        self.filtro_min = float(arvore.raios.min())
+        self.filtro_max = float(arvore.raios.max())
+        self.painel = True
+        self.metricas = metricas.analisar(arvore)
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -198,6 +207,21 @@ class Estado:
         self.cores = self.cores_com_selecao()
         self.enviar_para_gpu()
 
+    # ---------------------------------------------------------------- filtro
+    def visiveis(self):
+        """Máscara dos vasos dentro do intervalo de raio escolhido."""
+        r = self.arvore.raios
+        return (r >= self.filtro_min - 1e-9) & (r <= self.filtro_max + 1e-9)
+
+    def filtro_ativo(self):
+        return not self.visiveis().all()
+
+    def ajustar_filtro(self, d_min, d_max):
+        r = self.arvore.raios
+        passo = (r.max() - r.min()) / 20
+        self.filtro_min = float(np.clip(self.filtro_min + d_min * passo, r.min(), self.filtro_max))
+        self.filtro_max = float(np.clip(self.filtro_max + d_max * passo, self.filtro_min, r.max()))
+
     # ---------------------------------------------------------------- seleção
     def cores_com_selecao(self):
         cores = self.cores_base.copy()
@@ -212,8 +236,10 @@ class Estado:
         O, D = raycasting.raio_do_pixel(px, py, LARGURA, ALTURA, self.matriz_projecao(), visao)
         Om, Dm = raycasting.para_modelo(O, D, modelo)
         raio = arv.raios * MM_PARA_M * self.exagero        # mesma espessura dos tubos
-        self.selecionado, self.t_selecao = raycasting.escolher_vaso(
-            Om, Dm, arv.pontos, arv.segmentos, raio)
+        idx = np.nonzero(self.visiveis())[0]                # vasos escondidos não contam
+        i, self.t_selecao = raycasting.escolher_vaso(
+            Om, Dm, arv.pontos, arv.segmentos[idx], raio[idx])
+        self.selecionado = None if i is None else int(idx[i])
         self.ponto_selecao = None if self.t_selecao is None else O + self.t_selecao * D
         # só a cor muda: reenvia apenas o VBO de cores
         self.cores = self.cores_com_selecao()
@@ -230,7 +256,9 @@ class Estado:
         arv = self.arvore
         a, b = arv.pontos[arv.segmentos[self.selecionado]]
         comprimento = np.linalg.norm(b - a) / MM_PARA_M
-        return (f"vaso {self.selecionado} | raio {arv.raios[self.selecionado]:.3f} mm | "
+        geracao = self.metricas["geracao"][self.selecionado]
+        return (f"vaso {self.selecionado} | geração {geracao} | "
+                f"raio {arv.raios[self.selecionado]:.3f} mm | "
                 f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}").replace(".", ",")
 
     def enviar_para_gpu(self):
@@ -257,6 +285,12 @@ class Estado:
                  f"{MODOS[self.modo]} | {aa}")
         if self.plano and self.arvore.eh_3d:
             texto += f" | textura: {FILTROS[self.filtro]}"
+        if self.filtro_ativo() or self.modo_intervalo:
+            texto += (f"\nfiltro de raio [{self.filtro_min:.3f}, {self.filtro_max:.3f}] mm: "
+                      f"{int(self.visiveis().sum())}/{self.arvore.n_segmentos} vasos"
+                      ).replace(".", ",")
+            if self.modo_intervalo:
+                texto += " | MODO INTERVALO"
         if self.normais is not None:
             total = len(self.vertices) // 3
             texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
@@ -294,7 +328,15 @@ def desenhar_arvore(estado):
     glVertexPointer(3, GL_FLOAT, 0, None)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_c)
     glColorPointer(3, GL_FLOAT, 0, None)
-    glDrawArrays(estado.primitiva, 0, len(estado.vertices))
+    if estado.filtro_ativo():
+        # só os vértices dos vasos visíveis, por um buffer de índices
+        indices = np.nonzero(estado.visiveis()[estado.seg_id])[0].astype(np.uint32)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(estado.primitiva, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+    else:
+        glDrawArrays(estado.primitiva, 0, len(estado.vertices))
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glDisableClientState(GL_COLOR_ARRAY)
     glDisableClientState(GL_VERTEX_ARRAY)
@@ -329,10 +371,15 @@ def desenhar_com_shader(estado, modelview):
     transparente = alfa < 1.0
     painter = transparente and ORDENS[estado.ordem].startswith("Painter")
 
-    # lista de triângulos: filtrada pelo culling próprio e/ou ordenada (Painter)
-    tris = None
+    # lista de triângulos: filtrada (raio e/ou culling próprio) e ordenada (Painter)
+    mascara = None
+    if estado.filtro_ativo():
+        mascara = estado.visiveis()[estado.seg_id[::3]]       # vaso de cada triângulo
     if modo == "próprio (N·V)":
-        tris = triangulos_de_frente(estado, modelview)
+        frente = np.zeros(total, dtype=bool)
+        frente[triangulos_de_frente(estado, modelview)] = True
+        mascara = frente if mascara is None else mascara & frente
+    tris = None if mascara is None else np.nonzero(mascara)[0]
     if painter:
         tris = ordenar_tras_para_frente(estado, modelview,
                                         np.arange(total) if tris is None else tris)
@@ -500,6 +547,23 @@ def desenhar_barra_cores(estado, fonte):
         glVertex2f(x, y1)
     glEnd()
 
+    if estado.filtro_ativo() or estado.modo_intervalo:
+        # véu branco sobre a parte da escala que está fora do filtro
+        rmin, rmax = arv.raios.min(), arv.raios.max()
+        xa = x0 + (estado.filtro_min - rmin) / (rmax - rmin) * (x1 - x0)
+        xb = x0 + (estado.filtro_max - rmin) / (rmax - rmin) * (x1 - x0)
+        glColor4f(1.0, 1.0, 1.0, 0.8)
+        glBegin(GL_QUADS)
+        for a, b in ((x0, xa), (xb, x1)):
+            glVertex2f(a, y0 - 2); glVertex2f(b, y0 - 2)
+            glVertex2f(b, y1 + 2); glVertex2f(a, y1 + 2)
+        glEnd()
+        glColor3f(0.0, 0.0, 0.0)
+        glBegin(GL_LINES)
+        for x in (xa, xb):
+            glVertex2f(x, y0 - 5); glVertex2f(x, y1 + 5)
+        glEnd()
+
     desenhar_texto(fonte, f"{arv.raios.min():.3f}", x0 - 55, y0 + 2)
     desenhar_texto(fonte, f"{arv.raios.max():.3f}", x1 + 8, y0 + 2)
     desenhar_texto(fonte, "raio (mm)", LARGURA / 2 - 35, y1 + 6)
@@ -599,6 +663,13 @@ def desenhar_quadro(estado, fonte):
         desenhar_barra_cores(estado, fonte)
     for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
         desenhar_texto(fonte, linha, 10, 10 + 22 * i)
+    if estado.painel:                         # painel de métricas, à direita
+        filtro = estado.visiveis() if estado.filtro_ativo() else None
+        linhas = [" " + l + " " for l in
+                  metricas.linhas_painel(estado.arvore, estado.metricas, filtro)]
+        x = LARGURA - max(fonte.size(l)[0] for l in linhas) - 8     # alinhado à direita
+        for i, linha in enumerate(linhas):
+            desenhar_texto(fonte, linha, x, ALTURA - 120 - 22 * i, (245, 247, 250))
     info = estado.info_selecao()
     if info:                                  # painel do vaso selecionado, no topo
         desenhar_texto(fonte, " selecionado: " + info + " ", 10, ALTURA - 92, (255, 255, 255))
@@ -623,9 +694,21 @@ def tratar_tecla_luz(estado, tecla):
     return False
 
 
+def tratar_tecla_intervalo(estado, tecla):
+    """No modo intervalo, esquerda/direita mudam o mínimo e baixo/cima o máximo."""
+    ajustes = {pygame.K_LEFT: (-1, 0), pygame.K_RIGHT: (1, 0),
+               pygame.K_DOWN: (0, -1), pygame.K_UP: (0, 1)}
+    if tecla in ajustes:
+        estado.ajustar_filtro(*ajustes[tecla])
+        return True
+    return False
+
+
 def tratar_tecla(estado, tecla):
     passo = 0.05
     if estado.modo_luz and tratar_tecla_luz(estado, tecla):
+        return
+    if estado.modo_intervalo and tratar_tecla_intervalo(estado, tecla):
         return
     if tecla == pygame.K_g:
         nomes = list(shaders.FONTES)
@@ -634,6 +717,7 @@ def tratar_tecla(estado, tecla):
         estado.componentes = (estado.componentes + 1) % len(COMPONENTES)
     elif tecla == pygame.K_l:
         estado.modo_luz = not estado.modo_luz
+        estado.modo_intervalo = False
     elif tecla == pygame.K_b:
         estado.culling = (estado.culling + 1) % len(CULLING)
     elif tecla == pygame.K_d:
@@ -650,6 +734,11 @@ def tratar_tecla(estado, tecla):
         estado.plano = not estado.plano
     elif tecla == pygame.K_u:
         estado.filtro = (estado.filtro + 1) % len(FILTROS)
+    elif tecla == pygame.K_i:
+        estado.modo_intervalo = not estado.modo_intervalo
+        estado.modo_luz = False
+    elif tecla == pygame.K_j:
+        estado.painel = not estado.painel
     elif tecla == pygame.K_y:
         # o ray tracer roda em outro processo, sem travar o visualizador
         subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
