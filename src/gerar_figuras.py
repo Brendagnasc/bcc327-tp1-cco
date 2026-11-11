@@ -1,17 +1,17 @@
 """
 gerar_figuras.py
 
-Gera, de uma vez, todas as figuras usadas no relatório e na apresentação,
-com nomes fixos em report/figures/. Garante que as figuras são
-reproduzíveis a partir do código.
+Gera, de uma vez, todas as figuras do relatório e da apresentação do TP2,
+com nomes fixos em report/figures/, garantindo que sejam reproduzíveis.
 
 Uso (a partir da raiz do repositório):
     python src/gerar_figuras.py
 
-Uma janela OpenGL abre por alguns segundos enquanto as capturas do
-visualizador são feitas; as do modo didático são desenhadas fora da tela.
+Uma janela OpenGL abre por alguns segundos enquanto as capturas são feitas.
 """
 
+import contextlib
+import io
 import os
 import sys
 from pathlib import Path
@@ -19,125 +19,129 @@ from pathlib import Path
 if sys.platform.startswith("linux"):
     os.environ.setdefault("PYOPENGL_PLATFORM", "glx")
 
+import numpy as np
 import pygame
 from OpenGL.GL import *
 
-import modo_didatico as md
+import raytracer
 import visualizador as vis
 from leitor_vtk import ler_vtk
 
 PASTA = Path("report/figures")
+fonte = None
 
 
-# ----------------------------------------------------------------- visualizador
-def figura_vis(nome, arquivo, fonte, **ajustes):
-    """Cria um Estado do visualizador, aplica os ajustes, desenha e salva."""
+def novo_estado(arquivo, **ajustes):
+    """Estado do visualizador com os campos ajustados e a geometria pronta."""
     estado = vis.Estado(ler_vtk(f"data/{arquivo}.vtk"))
     estado.fbo_msaa, estado.amostras_msaa = vis.criar_fbo_msaa(4)
+    estado.modo = 1 if estado.arvore.eh_3d else 0
     estado.eixos = False
+    estado.painel = False                    # painel de métricas só nas figuras do Módulo 8
     for chave, valor in ajustes.items():
         setattr(estado, chave, valor)
     estado.reconstruir()
+    return estado
+
+
+def salvar(estado, nome):
     vis.desenhar_quadro(estado, fonte)
     vis.capturar(PASTA / f"{nome}.png")
     pygame.display.flip()
 
 
-def recortar_ampliar(origem, destino, caixa, fator=3):
-    """Recorta uma região de uma figura e amplia sem suavizar (para ver os pixels)."""
-    imagem = pygame.image.load(str(PASTA / origem))
-    parte = imagem.subsurface(pygame.Rect(caixa)).copy()
-    grande = pygame.transform.scale(parte, (caixa[2] * fator, caixa[3] * fator))
-    pygame.image.save(grande, str(PASTA / destino))
-    print("salvo:", PASTA / destino)
+def figura(nome, arquivo="tree3D_Nterm128", **ajustes):
+    salvar(novo_estado(arquivo, **ajustes), nome)
+
+
+def pixel_do_vaso(estado, k):
+    """Pixel onde aparece o ponto médio do vaso k (para simular o clique)."""
+    a, b = estado.arvore.pontos[estado.arvore.segmentos[k]]
+    c = estado.matriz_projecao() @ estado.matriz_visao() @ estado.matriz_modelo() \
+        @ np.append((a + b) / 2, 1.0)
+    c = c / c[3]
+    return (int(round((c[0] + 1) / 2 * vis.LARGURA - 0.5)),
+            int(round((1 - c[1]) / 2 * vis.ALTURA - 0.5)))
 
 
 def figuras_visualizador():
+    padrao = dict(vista=3, dist=2.6)
+
+    # Módulo 1: geometria 3D e vistas
+    figura("m1_tubos", "tree3D_Nterm256", vista=3, dist=3.4)
+    for i, vista in enumerate(["frontal", "lateral", "superior"]):
+        figura(f"m1_vista_{vista}", "tree3D_Nterm256", vista=i, dist=3.4, plano=False)
+
+    # Módulo 2: visibilidade
+    figura("m2_zbuffer_sem_culling", "tree3D_Nterm064", vista=3, dist=2.0, plano=False,
+           destacar_tras=True)
+    figura("m2_sem_zbuffer_sem_culling", "tree3D_Nterm064", vista=3, dist=2.0, plano=False,
+           destacar_tras=True, zbuffer=False)
+    figura("m2_sem_zbuffer_com_culling", "tree3D_Nterm064", vista=3, dist=2.0, plano=False,
+           destacar_tras=True, zbuffer=False, culling=1)
+    figura("m2_zbuffer_culling_proprio", "tree3D_Nterm064", vista=3, dist=2.0, plano=False,
+           destacar_tras=True, culling=2)
+    figura("m2_profundidade", "tree3D_Nterm064", vista=3, dist=2.0, plano=False,
+           ver_profundidade=True)
+
+    # Módulo 3: sombreamento, componentes e luz (de perto, para ver as facetas)
+    perto = dict(vista=3, dist=1.2, plano=False, msaa=True)
+    for nome in ("Flat", "Gouraud", "Phong"):
+        figura(f"m3_{nome.lower()}", "tree3D_Nterm064", sombreamento=nome, **perto)
+    for c, nome in enumerate(["ambiente", "difusa", "especular"]):
+        figura(f"m3_{nome}", "tree3D_Nterm064", componentes=c, **perto)
+    figura("m3_luz_esquerda", **padrao, luz=np.array([-1.8, 1.2, 1.5]))
+    figura("m3_luz_direita", **padrao, luz=np.array([1.8, -0.6, 1.5]))
+
+    # Módulo 4: transparência
+    figura("m4_opaco", **padrao, eixos=True)
+    figura("m4_alfa06_painter", **padrao, eixos=True, opacidade=1)
+    figura("m4_alfa03_painter", **padrao, eixos=True, opacidade=2)
+    figura("m4_alfa03_sem_ordem", **padrao, eixos=True, opacidade=2, ordem=1)
+    figura("m4_alfa03_painter_culling", **padrao, eixos=True, opacidade=2, culling=2)
+
+    # Módulo 5: textura
+    figura("m5_plano", vista=3, dist=3.6)
+    figura("m5_coordenadas_uv", vista=3, dist=3.6, filtro=3)
+    for f, nome in enumerate(["nearest", "bilinear_opengl", "bilinear_propria"]):
+        figura(f"m5_{nome}", modo=0, vista=2, dist=1.3, filtro=f)
+
+    # Módulo 6: Ray Casting (clique simulado no ponto médio de um vaso grosso)
+    estado = novo_estado("tree3D_Nterm128", **padrao, plano=False)
+    for k in np.argsort(estado.arvore.raios)[::-1][3:60]:
+        with contextlib.redirect_stdout(io.StringIO()):
+            estado.selecionar(*pixel_do_vaso(estado, k))
+        if estado.selecionado == k:
+            break
+    salvar(estado, "m6_selecao")
+
+    # Módulo 8: filtro por raio e métricas
+    raios = ler_vtk("data/tree3D_Nterm256.vtk").raios
+    figura("m8_completo", "tree3D_Nterm256", vista=3, dist=3.2, painel=True)
+    figura("m8_grossos", "tree3D_Nterm256", vista=3, dist=3.2, painel=True,
+           filtro_min=float(np.quantile(raios, 0.75)))
+    figura("m8_finos", "tree3D_Nterm256", vista=3, dist=3.2, painel=True, culling=2,
+           opacidade=1, filtro_max=float(np.quantile(raios, 0.4)))
+
+
+def figuras_raytracer():
+    # Módulo 7: os três modos do mini Ray Tracer
+    for modo in raytracer.MODOS:
+        img, st = raytracer.renderizar(modo, 640, 480)
+        caminho = PASTA / f"m7_rt_modo{modo}.png"
+        pygame.image.save(pygame.surfarray.make_surface(img.swapaxes(0, 1)), str(caminho))
+        print("salvo:", caminho, st)
+
+
+if __name__ == "__main__":
+    PASTA.mkdir(parents=True, exist_ok=True)
     pygame.display.init()
     pygame.font.init()
     pygame.display.set_mode((vis.LARGURA, vis.ALTURA), pygame.OPENGL | pygame.DOUBLEBUF)
     pygame.display.set_caption("Gerando figuras...")
     fonte = pygame.font.Font(None, 24)
     vis.inicializar_gl()
-
-    # Módulo 1: primitivas e atributos
-    figura_vis("m1_linhas_jet", "tree2D_Nterm064", fonte, modo=0)
-    figura_vis("m1_faixas_jet", "tree2D_Nterm064", fonte, modo=1)
-    figura_vis("m1_faixas_viridis", "tree2D_Nterm064", fonte, modo=1, mapa=1)
-    figura_vis("m1_solido", "tree2D_Nterm064", fonte, modo=2)
-    figura_vis("m1_tubos_3d", "tree3D_Nterm256", fonte, modo=1, vista=3, dist=3.4)
-
-    # Módulo 2: transformações (eixos do mundo ficam parados)
-    figura_vis("m2_original", "tree2D_Nterm064", fonte, modo=1, eixos=True)
-    figura_vis("m2_translacao", "tree2D_Nterm064", fonte, modo=1, eixos=True, tx=0.35, ty=-0.2)
-    figura_vis("m2_rotacao", "tree2D_Nterm064", fonte, modo=1, eixos=True, ang_z=35)
-    figura_vis("m2_escala", "tree2D_Nterm064", fonte, modo=1, eixos=True, s=0.6)
-
-    # Módulo 2: vistas do observador e projeções
-    for i, vista in enumerate(["frontal", "lateral", "superior", "isometrica"]):
-        figura_vis(f"m2_vista_{vista}", "tree3D_Nterm256", fonte, vista=i, eixos=True)
-    figura_vis("m2_perspectiva", "tree3D_Nterm064", fonte, modo=1, vista=3, dist=2.4, eixos=True)
-    figura_vis("m2_ortografica", "tree3D_Nterm064", fonte, modo=1, vista=3, dist=2.4, eixos=True,
-               perspectiva=False)
-
-    # Módulo 5: MSAA (recorte ampliado de uma borda de tubo)
-    figura_vis("m5_msaa_off", "tree3D_Nterm064", fonte, modo=1, vista=3, dist=1.3)
-    figura_vis("m5_msaa_on", "tree3D_Nterm064", fonte, modo=1, vista=3, dist=1.3, msaa=True)
-    caixa = (380, 330, 150, 150)
-    recortar_ampliar("m5_msaa_off.png", "m5_msaa_off_zoom.png", caixa)
-    recortar_ampliar("m5_msaa_on.png", "m5_msaa_on_zoom.png", caixa)
-
-    pygame.display.quit()
-
-
-# ----------------------------------------------------------------- modo didático
-def figura_did(app, superficie, fonte, nome, **ajustes):
-    for chave, valor in ajustes.items():
-        setattr(app, chave, valor)
-    app.rasterizar()
-    app.desenhar(superficie, fonte)
-    pygame.image.save(superficie, str(PASTA / f"{nome}.png"))
-    print("salvo:", PASTA / f"{nome}.png")
-
-
-def figuras_didatico():
-    pygame.font.init()
-    fonte = pygame.font.Font(None, 22)
-    tela = pygame.Surface((md.LARGURA, md.ALTURA))     # desenha fora da tela
-
-    app = md.App(ler_vtk("data/tree2D_Nterm016.vtk"))
-    # Módulo 3: rasterização de segmentos
-    figura_did(app, tela, fonte, "m3_arvore_bresenham", modo=1)
-    figura_did(app, tela, fonte, "m3_arvore_dda", modo=1, algoritmo="DDA")
-    figura_did(app, tela, fonte, "m3_segmento_bresenham", modo=2, algoritmo="Bresenham")
-    # Módulo 4: Scanline Fill (completo e no meio da animação)
-    figura_did(app, tela, fonte, "m4_scanline", modo=3)
-    figura_did(app, tela, fonte, "m4_scanline_animacao", modo=3, anim=24)
-    app.anim = None
-    # Módulo 5: supersampling
-    figura_did(app, tela, fonte, "m5_ssaa_leque", modo=4, cena_aa="leque", fator=4)
-    figura_did(app, tela, fonte, "m5_ssaa_arvore", modo=4, cena_aa="árvore", fator=4)
-
-    # Módulos 6 e 7 com um modelo um pouco maior
-    app = md.App(ler_vtk("data/tree2D_Nterm032.vtk"))
-    figura_did(app, tela, fonte, "m6_recorte_antes", modo=5, vista_recorte=1)
-    figura_did(app, tela, fonte, "m6_recorte_depois", modo=5, vista_recorte=2)
-    figura_did(app, tela, fonte, "m6_recorte_sobreposto", modo=5, vista_recorte=0)
-
-    app = md.App(ler_vtk("data/tree2D_Nterm016.vtk"))
-    figura_did(app, tela, fonte, "m7_sh_regiao_retangulo", modo=6, vista_recorte=0)
-    figura_did(app, tela, fonte, "m7_sh_regiao_hexagono", tipo_janela="hexágono")
-    figura_did(app, tela, fonte, "m7_u_antes", sujeito="forma em U", tipo_janela="retângulo",
-               vista_recorte=1)
-    figura_did(app, tela, fonte, "m7_sh_u_depois", vista_recorte=2)
-    figura_did(app, tela, fonte, "m7_wa_u_depois", alg_poligono="Weiler–Atherton")
-    figura_did(app, tela, fonte, "m7_sh_l_concavo", sujeito="região de interesse",
-               tipo_janela="L côncavo", alg_poligono="Sutherland–Hodgman", vista_recorte=0)
-    figura_did(app, tela, fonte, "m7_wa_l_concavo", alg_poligono="Weiler–Atherton")
-
-
-if __name__ == "__main__":
-    PASTA.mkdir(parents=True, exist_ok=True)
     figuras_visualizador()
-    figuras_didatico()
+    figuras_raytracer()
+    pygame.display.quit()
     print(f"\n{len(list(PASTA.glob('*.png')))} figuras em {PASTA}/")
