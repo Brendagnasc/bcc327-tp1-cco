@@ -36,6 +36,7 @@ Teclas e mouse:
     N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
     T                      mostra / esconde o plano de referência com textura
     U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
+    Y                      abre o mini Ray Tracer (raytracer.py) em outra janela
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -43,6 +44,7 @@ Teclas e mouse:
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -648,6 +650,9 @@ def tratar_tecla(estado, tecla):
         estado.plano = not estado.plano
     elif tecla == pygame.K_u:
         estado.filtro = (estado.filtro + 1) % len(FILTROS)
+    elif tecla == pygame.K_y:
+        # o ray tracer roda em outro processo, sem travar o visualizador
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
     elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
