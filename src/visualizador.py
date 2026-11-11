@@ -2,14 +2,17 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 5: MSAA ligável (antialiasing da API), tubos 3D com espessura
-proporcional ao raio e câmera com matrizes próprias (transformacoes.py).
+TP2, versão 6: seleção de vasos por Ray Casting (clique direito), plano
+com textura, transparência com Painter's Algorithm, Back-Face Culling,
+Z-Buffer, sombreamento Flat / Gouraud / Phong e luz pontual móvel.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
 
 Teclas e mouse:
     arrastar (botão esq.)  rotação em torno de x e y
+    clique direito         seleciona o vaso sob o cursor (Ray Casting);
+                           em área vazia, desfaz a seleção
     roda do mouse          zoom (aproxima / afasta a câmera)
     Z / X                  rotação em torno de z
     setas                  translação em x e y
@@ -21,6 +24,19 @@ Teclas e mouse:
     R                      restaura transformações e vista
     M                      liga / desliga o antialiasing MSAA
     S                      salva a tela em report/figures/
+    G                      sombreamento: Flat / Gouraud / Phong
+    K                      componentes: ambiente / + difusa / + especular
+    L                      modo luz: setas e PageUp/PageDown movem a luz,
+                           + e - mudam a intensidade (L de novo volta ao normal)
+    B                      Back-Face Culling: desligado / OpenGL / próprio (N . V)
+    D                      liga / desliga o Z-Buffer (teste de profundidade)
+    V                      mostra o conteúdo do Z-Buffer em tons de cinza
+    F                      pinta de vermelho as faces de trás
+    O                      opacidade dos vasos: 1,0 / 0,6 / 0,3
+    N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
+    T                      mostra / esconde o plano de referência com textura
+    U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
+    Y                      abre o mini Ray Tracer (raytracer.py) em outra janela
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -28,6 +44,7 @@ Teclas e mouse:
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,17 +58,27 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import raycasting
+import shaders
 import transformacoes as T
+from textura import PlanoTexturizado
 from cores import mapear_cores
-from geometria import faixas_2d, tubos_3d
+from geometria import faixas_2d, normais_de_face, tubos_3d
 from leitor_vtk import ler_vtk
 
 LARGURA, ALTURA = 900, 900
 FUNDO = (1.0, 1.0, 1.0)
 VERMELHO = (0.8, 0.1, 0.1)
+COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
+LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
+PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
+CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
+OPACIDADES = [1.0, 0.6, 0.3]
+ORDENS = ["Painter's (trás → frente)", "sem ordenação"]
+FILTROS = ["NEAREST", "bilinear (OpenGL)", "bilinear (própria)", "coordenadas (u, v)"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -74,7 +101,24 @@ class Estado:
         self.msaa = False
         self.fbo_msaa = None            # framebuffer multiamostrado (criado em main)
         self.amostras_msaa = 0
-        self.vertices = self.cores = self.normais = None
+        self.vertices = self.cores = self.normais = self.normais_face = None
+        self.sombreamento = "Phong"
+        self.componentes = 2            # 0 ambiente, 1 + difusa, 2 + especular
+        self.modo_luz = False
+        self.luz = np.array(LUZ_PADRAO)  # posição da luz no espaço do MUNDO
+        self.intensidade = 1.0
+        self.culling = 0
+        self.zbuffer = True
+        self.ver_profundidade = False
+        self.destacar_tras = False
+        self.tri_desenhados = 0
+        self.opacidade = 0
+        self.ordem = 0
+        self.plano = True
+        self.filtro = 1
+        self.selecionado = None         # índice do vaso escolhido por Ray Casting
+        self.t_selecao = None
+        self.ponto_selecao = None       # ponto de impacto no espaço do mundo
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -86,6 +130,9 @@ class Estado:
         self.restaurar()
 
     def restaurar(self):
+        if hasattr(self, "luz"):
+            self.luz = np.array(LUZ_PADRAO)
+            self.intensidade = 1.0
         self.tx = self.ty = self.tz = 0.0
         self.ang_x = self.ang_y = self.ang_z = 0.0
         self.s = 1.0
@@ -111,11 +158,11 @@ class Estado:
     def matriz_projecao(self):
         aspecto = LARGURA / ALTURA
         if self.perspectiva:
-            return T.perspectiva(FOVY, aspecto, 0.01, 100.0)
+            return T.perspectiva(FOVY, aspecto, PERTO, LONGE)
         # Caixa ortográfica com a mesma altura que o frustum tem no alvo,
         # para o modelo não "pular" de tamanho ao trocar de projeção
         h = self.dist * np.tan(np.radians(FOVY) / 2)
-        return T.ortografica(-h * aspecto, h * aspecto, -h, h, 0.01, 100.0)
+        return T.ortografica(-h * aspecto, h * aspecto, -h, h, PERTO, LONGE)
 
     # ---------------------------------------------------------------- geometria
     def reconstruir(self):
@@ -126,10 +173,11 @@ class Estado:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
         raio = arv.raios * MM_PARA_M * self.exagero
-        self.normais = None
+        self.normais = self.normais_face = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
-            self.cores = np.repeat(cores_seg, 2, axis=0)
+            seg_id = np.repeat(np.arange(arv.n_segmentos), 2)
+            self.cores = cores_seg[seg_id]
             self.primitiva = GL_LINES
         elif not arv.eh_3d:                   # 2D: faixas planas
             self.vertices, seg_id = faixas_2d(arv.pontos, arv.segmentos, raio)
@@ -137,19 +185,62 @@ class Estado:
             self.primitiva = GL_TRIANGLES
         else:                                 # 3D: tubos com normais para iluminação
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
+            self.normais_face = normais_de_face(self.vertices, self.normais)
             self.cores = cores_seg[seg_id]
+            # dados por triângulo para o culling próprio: normal e centroide
+            self.tri_normal = self.normais_face[::3].astype(float)
+            self.tri_centro = self.vertices.reshape(-1, 3, 3).mean(axis=1).astype(float)
             self.primitiva = GL_TRIANGLES
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
-        self.cores = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.seg_id = seg_id                         # de qual vaso é cada vértice
+        self.cores_base = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.cores = self.cores_com_selecao()
         self.enviar_para_gpu()
+
+    # ---------------------------------------------------------------- seleção
+    def cores_com_selecao(self):
+        cores = self.cores_base.copy()
+        if self.selecionado is not None:
+            cores[self.seg_id == self.selecionado] = COR_SELECAO
+        return cores
+
+    def selecionar(self, px, py):
+        """Ray Casting: raio pelo pixel clicado e primeiro vaso atingido."""
+        arv = self.arvore
+        visao, modelo = self.matriz_visao(), self.matriz_modelo()
+        O, D = raycasting.raio_do_pixel(px, py, LARGURA, ALTURA, self.matriz_projecao(), visao)
+        Om, Dm = raycasting.para_modelo(O, D, modelo)
+        raio = arv.raios * MM_PARA_M * self.exagero        # mesma espessura dos tubos
+        self.selecionado, self.t_selecao = raycasting.escolher_vaso(
+            Om, Dm, arv.pontos, arv.segmentos, raio)
+        self.ponto_selecao = None if self.t_selecao is None else O + self.t_selecao * D
+        # só a cor muda: reenvia apenas o VBO de cores
+        self.cores = self.cores_com_selecao()
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbos[1])
+        glBufferData(GL_ARRAY_BUFFER, self.cores.nbytes, self.cores, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        print(f"raio O = {np.round(O, 3)}  D = {np.round(D / np.linalg.norm(D), 3)}  ->  "
+              + ("nenhum vaso" if self.selecionado is None else
+                 f"vaso {self.selecionado}, t = {self.t_selecao:.4f}"))
+
+    def info_selecao(self):
+        if self.selecionado is None:
+            return None
+        arv = self.arvore
+        a, b = arv.pontos[arv.segmentos[self.selecionado]]
+        comprimento = np.linalg.norm(b - a) / MM_PARA_M
+        return (f"vaso {self.selecionado} | raio {arv.raios[self.selecionado]:.3f} mm | "
+                f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}").replace(".", ",")
 
     def enviar_para_gpu(self):
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
-            self.vbos = glGenBuffers(3)
-        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais)):
+            self.vbos = glGenBuffers(4)     # posição, cor, normal do vértice, normal da face
+            self.ebo = glGenBuffers(1)      # índices dos triângulos visíveis (culling próprio)
+        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
+                                          self.normais_face)):
             if dados is not None:
                 dados = np.ascontiguousarray(dados, dtype=np.float32)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -162,23 +253,41 @@ class Estado:
             aa = "MSAA indisponível"
         else:
             aa = f"MSAA {self.amostras_msaa}x ligado" if self.msaa else "MSAA desligado"
-        return (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
-                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x | {aa}")
+        texto = (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
+                 f"{MODOS[self.modo]} | {aa}")
+        if self.plano and self.arvore.eh_3d:
+            texto += f" | textura: {FILTROS[self.filtro]}"
+        if self.normais is not None:
+            total = len(self.vertices) // 3
+            texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
+                      f"triângulos | Z-Buffer {'ligado' if self.zbuffer else 'desligado'}")
+            if OPACIDADES[self.opacidade] < 1.0:
+                texto += (f" | opacidade {OPACIDADES[self.opacidade]:.1f}".replace(".", ",")
+                          + f" | ordem: {ORDENS[self.ordem]}")
+            texto += (f"\n{self.sombreamento} | {COMPONENTES[self.componentes]} | "
+                      f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
+                      f"x{self.intensidade:.1f}")
+            if self.modo_luz:
+                texto += " | MODO LUZ"
+        return texto
 
 
 # -------------------------------------------------------------------- desenho
+# coeficientes do modelo de Blinn-Phong
+KA, KD, KS, BRILHO = 0.25, 0.75, 0.6, 40.0
+COMPONENTES = ["só ambiente", "ambiente + difusa", "ambiente + difusa + especular"]
+programas = {}              # criados em inicializar_gl(), quando já existe contexto
+
+
 def desenhar_arvore(estado):
+    modelview = estado.matriz_visao() @ estado.matriz_modelo()
+    if estado.normais is not None:
+        desenhar_com_shader(estado, modelview)
+        return
+
     glMatrixMode(GL_MODELVIEW)
-    glLoadMatrixf(T.para_opengl(estado.matriz_visao() @ estado.matriz_modelo()))
-
-    vbo_v, vbo_c, vbo_n = estado.vbos
-    iluminar = estado.normais is not None
-    if iluminar:
-        glEnable(GL_LIGHTING)
-        glEnableClientState(GL_NORMAL_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_n)
-        glNormalPointer(GL_FLOAT, 0, None)     # None = começa no início do buffer
-
+    glLoadMatrixf(T.para_opengl(modelview))
+    vbo_v, vbo_c = estado.vbos[:2]
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_v)
@@ -190,21 +299,160 @@ def desenhar_arvore(estado):
     glDisableClientState(GL_COLOR_ARRAY)
     glDisableClientState(GL_VERTEX_ARRAY)
 
-    if iluminar:
-        glDisableClientState(GL_NORMAL_ARRAY)
-        glDisable(GL_LIGHTING)
+
+def desenhar_com_shader(estado, modelview):
+    """Tubos: as matrizes do grupo e a luz vão como uniforms e a iluminação
+    é calculada pelos nossos shaders, sem o pipeline fixo."""
+    prog = programas[estado.sombreamento]
+    prog.usar()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", modelview)
+    prog.mat3("u_normal", shaders.matriz_normal(modelview))
+
+    enviar_luz(prog, estado)
+
+    # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
+    # recebe as normais de FACE em vez das normais dos vértices.
+    prog.float("u_destacar_tras", 1.0 if estado.destacar_tras else 0.0)
+
+    vbo_v, vbo_c, vbo_n, vbo_nf = estado.vbos
+    vbo_normal = vbo_nf if estado.sombreamento == "Flat" else vbo_n
+    for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+    total = len(estado.vertices) // 3
+    modo = CULLING[estado.culling]
+    alfa = OPACIDADES[estado.opacidade]
+    prog.float("u_alfa", alfa)
+    transparente = alfa < 1.0
+    painter = transparente and ORDENS[estado.ordem].startswith("Painter")
+
+    # lista de triângulos: filtrada pelo culling próprio e/ou ordenada (Painter)
+    tris = None
+    if modo == "próprio (N·V)":
+        tris = triangulos_de_frente(estado, modelview)
+    if painter:
+        tris = ordenar_tras_para_frente(estado, modelview,
+                                        np.arange(total) if tris is None else tris)
+
+    if modo == "OpenGL":
+        # o OpenGL decide pela ORDEM dos vértices já projetados na tela:
+        # anti-horário = frente (glFrontFace), horário = trás (descartada)
+        glEnable(GL_CULL_FACE)
+        glFrontFace(GL_CCW)
+        glCullFace(GL_BACK)
+    if painter:
+        # já ordenados: o Z-Buffer continua TESTANDO (objetos opacos tapam),
+        # mas não GRAVA, para um vaso transparente não esconder o de trás
+        glDepthMask(GL_FALSE)
+
+    if tris is None:
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+        estado.tri_desenhados = total     # o OpenGL não informa quantos descartou
+    else:
+        indices = (tris[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        estado.tri_desenhados = len(tris)
+
+    glDepthMask(GL_TRUE)
+    glDisable(GL_CULL_FACE)
+
+    for local in range(3):
+        glDisableVertexAttribArray(local)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glUseProgram(0)
 
 
-def configurar_iluminacao():
-    """Iluminação da API (OpenGL fixo), usada só para dar volume aos tubos.
-    Uma luz direcional + luz ambiente; o estudo de iluminação é tema do TP2."""
-    glEnable(GL_LIGHT0)
-    glLightfv(GL_LIGHT0, GL_AMBIENT, (0.5, 0.5, 0.5, 1.0))
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.6, 0.6, 0.6, 1.0))
-    glEnable(GL_COLOR_MATERIAL)                     # a cor do vértice vira o material
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-    glEnable(GL_NORMALIZE)                          # a matriz M tem escala: renormaliza
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
+def triangulos_de_frente(estado, modelview):
+    """Back-Face Culling próprio: índices dos triângulos com N . V > 0.
+
+    No espaço da câmera, N é a normal da face e V aponta do triângulo para
+    o observador. Na perspectiva o observador está na origem, então
+    V = -centroide; na ortográfica todos os raios são paralelos a +z,
+    então V = (0, 0, 1). Se N . V <= 0, a face está de costas e é descartada.
+    """
+    normais = estado.tri_normal @ shaders.matriz_normal(modelview).T
+    if estado.perspectiva:
+        centros = estado.tri_centro @ modelview[:3, :3].T + modelview[:3, 3]
+        n_dot_v = -(normais * centros).sum(axis=1)
+    else:
+        n_dot_v = normais[:, 2]
+    return np.nonzero(n_dot_v > 0)[0]
+
+
+def ordenar_tras_para_frente(estado, modelview, tris):
+    """Painter's Algorithm: ordena os triângulos do mais distante ao mais próximo.
+
+    No espaço da câmera o observador olha para -z: quanto MAIS negativo o z
+    do centroide, mais longe está o triângulo. Desenhando nessa ordem, cada
+    triângulo transparente é composto sobre tudo o que está atrás dele,
+    como um pintor que pinta o fundo primeiro.
+    """
+    z = estado.tri_centro[tris] @ modelview[2, :3] + modelview[2, 3]
+    return tris[np.argsort(z, kind="stable")]
+
+
+def enviar_luz(prog, estado):
+    """Uniforms da iluminação, comuns aos vasos e ao plano."""
+    # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
+    luz_camera = estado.matriz_visao() @ np.append(estado.luz, 1.0)
+    prog.vec3("u_luz_pos", luz_camera[:3])
+    prog.float("u_intensidade", estado.intensidade)
+    prog.float("u_ka", KA)
+    prog.float("u_kd", KD)
+    prog.float("u_ks", KS)
+    prog.float("u_brilho", BRILHO)
+    prog.float("u_usar_difusa", 1.0 if estado.componentes >= 1 else 0.0)
+    prog.float("u_usar_especular", 1.0 if estado.componentes >= 2 else 0.0)
+
+
+plano_ref = None            # criado em inicializar_gl()
+
+
+def desenhar_plano(estado):
+    """Plano de referência texturizado. Fica no espaço do MUNDO (usa só V),
+    como um piso: não acompanha as transformações do modelo."""
+    prog = programas["Textura"]
+    prog.usar()
+    visao = estado.matriz_visao()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", visao)
+    prog.mat3("u_normal", shaders.matriz_normal(visao))
+    enviar_luz(prog, estado)
+    prog.int("u_textura", 0)                    # unidade de textura 0
+    prog.int("u_modo", estado.filtro)
+    filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
+    plano_ref.desenhar(filtro_gl)
+    glUseProgram(0)
+
+
+def desenhar_impacto(estado):
+    """Marca o ponto onde o raio de seleção atingiu o vaso."""
+    if estado.ponto_selecao is None:
+        return
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(8.0)
+    glBegin(GL_POINTS)
+    glColor3f(0.0, 0.0, 0.0)
+    glVertex3f(*estado.ponto_selecao)
+    glEnd()
+
+
+def desenhar_luz(estado):
+    """Marcador amarelo na posição da luz (só a matriz de visão: a luz é do mundo)."""
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(14.0 if estado.modo_luz else 9.0)
+    glBegin(GL_POINTS)
+    glColor3f(1.0, 0.8, 0.0)
+    glVertex3f(*estado.luz)
+    glEnd()
 
 
 def desenhar_eixos(estado):
@@ -222,9 +470,9 @@ def desenhar_eixos(estado):
     glLineWidth(2.0)
 
 
-def desenhar_texto(fonte, texto, x, y):
+def desenhar_texto(fonte, texto, x, y, fundo=None):
     """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
-    superficie = fonte.render(texto, True, (20, 20, 20))
+    superficie = fonte.render(texto, True, (20, 20, 20), fundo)
     dados = pygame.image.tobytes(superficie, "RGBA", True)
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
@@ -286,23 +534,55 @@ def criar_fbo_msaa(amostras=4):
         return None, 0
 
 
+def mostrar_profundidade(estado):
+    """Lê o Z-Buffer e desenha a profundidade em tons de cinza (perto = escuro).
+
+    O buffer guarda d em [0, 1], que NÃO é linear na distância quando a
+    projeção é perspectiva. A conversão para a distância z da câmera é a
+    inversa da projeção:  z = 2 n f / ((f + n) - (2d - 1)(f - n)).
+    """
+    glPixelStorei(GL_PACK_ALIGNMENT, 1)
+    d = np.frombuffer(glReadPixels(0, 0, LARGURA, ALTURA, GL_DEPTH_COMPONENT, GL_FLOAT),
+                      dtype=np.float32).reshape(ALTURA, LARGURA).astype(float)
+    fundo = d >= 1.0
+    if estado.perspectiva:
+        z = 2 * PERTO * LONGE / ((LONGE + PERTO) - (2 * d - 1) * (LONGE - PERTO))
+    else:
+        z = PERTO + d * (LONGE - PERTO)
+    cinza = np.full_like(z, 255.0)
+    if (~fundo).any():
+        zmin, zmax = z[~fundo].min(), z[~fundo].max()
+        cinza[~fundo] = 20 + 200 * (z[~fundo] - zmin) / max(zmax - zmin, 1e-9)
+    img = np.repeat(cinza[:, :, None], 3, axis=2).astype(np.uint8)
+    glClear(GL_COLOR_BUFFER_BIT)
+    glWindowPos2d(0, 0)
+    glDrawPixels(LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(img))
+
+
 def desenhar_quadro(estado, fonte):
-    usar_msaa = estado.msaa and estado.fbo_msaa is not None
+    # o Z-Buffer é lido da janela; o FBO multiamostrado não pode ser lido direto
+    usar_msaa = estado.msaa and estado.fbo_msaa is not None and not estado.ver_profundidade
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
         glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-    glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
+    # Z-Buffer: cada fragmento só é escrito se estiver mais perto que o já gravado
+    if estado.zbuffer:
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+    else:
+        glDisable(GL_DEPTH_TEST)               # vale o último desenhado (ordem do VBO)
     glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
     glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
 
-    # Luz definida com a modelview identidade: fica presa à câmera ("lanterna")
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-    glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.6, 1.0, 0.0))
     if estado.eixos:
         desenhar_eixos(estado)
+    if estado.plano and estado.arvore.eh_3d:
+        desenhar_plano(estado)                 # opaco: antes dos vasos transparentes
     desenhar_arvore(estado)
+    if estado.normais is not None:
+        desenhar_luz(estado)
+    desenhar_impacto(estado)
 
     if usar_msaa:                              # resolve: média das amostras -> janela
         glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
@@ -311,16 +591,69 @@ def desenhar_quadro(estado, fonte):
                           GL_COLOR_BUFFER_BIT, GL_NEAREST)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+    if estado.ver_profundidade:
+        mostrar_profundidade(estado)
+
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
     if estado.modo != 2:
         desenhar_barra_cores(estado, fonte)
-    desenhar_texto(fonte, estado.descricao(), 10, 10)
+    for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
+        desenhar_texto(fonte, linha, 10, 10 + 22 * i)
+    info = estado.info_selecao()
+    if info:                                  # painel do vaso selecionado, no topo
+        desenhar_texto(fonte, " selecionado: " + info + " ", 10, ALTURA - 92, (255, 255, 255))
 
 
 # -------------------------------------------------------------------- entrada
+def tratar_tecla_luz(estado, tecla):
+    """No modo luz, setas e PageUp/PageDown movem a fonte e + / - mudam a intensidade."""
+    passo = 0.2
+    movimentos = {pygame.K_LEFT: (-passo, 0, 0), pygame.K_RIGHT: (passo, 0, 0),
+                  pygame.K_UP: (0, passo, 0), pygame.K_DOWN: (0, -passo, 0),
+                  pygame.K_PAGEUP: (0, 0, passo), pygame.K_PAGEDOWN: (0, 0, -passo)}
+    if tecla in movimentos:
+        estado.luz = estado.luz + np.array(movimentos[tecla])
+        return True
+    if tecla in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+        estado.intensidade = min(estado.intensidade + 0.1, 2.0)
+        return True
+    if tecla in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        estado.intensidade = max(estado.intensidade - 0.1, 0.0)
+        return True
+    return False
+
+
 def tratar_tecla(estado, tecla):
     passo = 0.05
-    if tecla == pygame.K_e:
+    if estado.modo_luz and tratar_tecla_luz(estado, tecla):
+        return
+    if tecla == pygame.K_g:
+        nomes = list(shaders.FONTES)
+        estado.sombreamento = nomes[(nomes.index(estado.sombreamento) + 1) % len(nomes)]
+    elif tecla == pygame.K_k:
+        estado.componentes = (estado.componentes + 1) % len(COMPONENTES)
+    elif tecla == pygame.K_l:
+        estado.modo_luz = not estado.modo_luz
+    elif tecla == pygame.K_b:
+        estado.culling = (estado.culling + 1) % len(CULLING)
+    elif tecla == pygame.K_d:
+        estado.zbuffer = not estado.zbuffer
+    elif tecla == pygame.K_v:
+        estado.ver_profundidade = not estado.ver_profundidade
+    elif tecla == pygame.K_f:
+        estado.destacar_tras = not estado.destacar_tras
+    elif tecla == pygame.K_o:
+        estado.opacidade = (estado.opacidade + 1) % len(OPACIDADES)
+    elif tecla == pygame.K_n:
+        estado.ordem = (estado.ordem + 1) % len(ORDENS)
+    elif tecla == pygame.K_t:
+        estado.plano = not estado.plano
+    elif tecla == pygame.K_u:
+        estado.filtro = (estado.filtro + 1) % len(FILTROS)
+    elif tecla == pygame.K_y:
+        # o ray tracer roda em outro processo, sem travar o visualizador
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
+    elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
     elif tecla == pygame.K_c:
@@ -370,7 +703,11 @@ def inicializar_gl():
     glLineWidth(2.0)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    configurar_iluminacao()
+    programas.update(shaders.criar_programas())
+    global plano_ref
+    plano_ref = PlanoTexturizado()
+    print("OpenGL:", glGetString(GL_VERSION).decode(),
+          "| GLSL:", glGetString(GL_SHADING_LANGUAGE_VERSION).decode())
 
 
 def capturar(caminho):
@@ -394,7 +731,7 @@ def nome_captura(estado):
 
 
 def main():
-    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree2D_Nterm064.vtk"
+    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree3D_Nterm064.vtk"
     arvore = ler_vtk(caminho)
 
     pygame.display.init()             # só vídeo e fonte (evita iniciar o áudio)
@@ -406,6 +743,7 @@ def main():
     inicializar_gl()
 
     estado = Estado(arvore)
+    estado.modo = 1 if arvore.eh_3d else 0          # TP2: modelos 3D abrem em tubos
     estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
     estado.reconstruir()
 
@@ -423,6 +761,8 @@ def main():
                     salvar = True
                 else:
                     tratar_tecla(estado, evento.key)
+            elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
+                estado.selecionar(*evento.pos)
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
                 estado.ang_y += evento.rel[0] * 0.5
                 estado.ang_x += evento.rel[1] * 0.5
