@@ -63,8 +63,15 @@ def analisar(arvore):
             filhos[p_].append(k)
     razoes = [r[k] ** 3 / sum(r[f] ** 3 for f in fs) for k, fs in enumerate(filhos) if len(fs) == 2]
 
+    terminais_abaixo = np.zeros(len(seg), dtype=int)     # quantos terminais cada vaso irriga
+    for k in np.argsort(geracao)[::-1]:                    # das pontas para a raiz
+        terminais_abaixo[k] = 1 if not filhos[k] else sum(terminais_abaixo[f] for f in filhos[k])
+
     return {
         "raiz": raiz,
+        "pai": pai,
+        "filhos": filhos,
+        "terminais_abaixo": terminais_abaixo,
         "geracao": geracao,
         "comprimento": comprimento,
         "volume": volume,
@@ -75,6 +82,44 @@ def analisar(arvore):
         "volume_total": float(volume.sum()),
         "murray_media": float(np.mean(razoes)) if razoes else float("nan"),
         "murray_desvio": float(np.std(razoes)) if razoes else float("nan"),
+    }
+
+
+def caminho_ate_raiz(met, k):
+    """Vasos entre o vaso k e a raiz (sem incluir k), subindo pelos pais."""
+    caminho = []
+    p = met["pai"][k]
+    while p >= 0:
+        caminho.append(int(p))
+        p = met["pai"][p]
+    return caminho
+
+
+def subarvore(met, k):
+    """Todos os vasos alimentados pelo vaso k (descendentes, sem incluir k)."""
+    resultado, pilha = [], list(met["filhos"][k])
+    while pilha:
+        f = pilha.pop()
+        resultado.append(f)
+        pilha.extend(met["filhos"][f])
+    return resultado
+
+
+def territorio(arvore, met, k):
+    """O que o vaso k abastece.
+
+    No método CCO cada terminal recebe o mesmo fluxo, então a fração do fluxo
+    total que passa por k é (terminais abaixo de k) / (total de terminais).
+    A fração de volume é o volume da subárvore de k (incluindo k) sobre o
+    volume total dos vasos.
+    """
+    sub = subarvore(met, k)
+    return {
+        "terminais": int(met["terminais_abaixo"][k]),
+        "fracao_fluxo": float(met["terminais_abaixo"][k] / met["n_terminais"]),
+        "fracao_volume": float(met["volume"][[k] + sub].sum() / met["volume_total"]),
+        "caminho": caminho_ate_raiz(met, k),
+        "subarvore": sub,
     }
 
 
