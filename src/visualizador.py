@@ -2,16 +2,17 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-TP2, versão 7: filtro por intervalo de raio e painel de métricas, seleção
-de vasos por Ray Casting, plano com textura, transparência com Painter's
-Algorithm, Back-Face Culling, Z-Buffer, Flat / Gouraud / Phong e luz pontual.
+Versão portfólio 1: o clique num vaso acende o caminho até a raiz e a
+subárvore que ele irriga, com a fração do fluxo e do volume. Mantém tudo do
+TP2 (visibilidade, iluminação, transparência, textura, Ray Casting, filtro).
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
 
 Teclas e mouse:
     arrastar (botão esq.)  rotação em torno de x e y
-    clique direito         seleciona o vaso sob o cursor (Ray Casting);
+    clique direito         seleciona o vaso sob o cursor (Ray Casting) e acende
+                           o caminho até a raiz e a subárvore que ele irriga;
                            em área vazia, desfaz a seleção
     roda do mouse          zoom (aproxima / afasta a câmera)
     Z / X                  rotação em torno de z
@@ -74,6 +75,9 @@ LARGURA, ALTURA = 900, 900
 FUNDO = (1.0, 1.0, 1.0)
 VERMELHO = (0.8, 0.1, 0.1)
 COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
+COR_CAMINHO = (1.0, 0.82, 0.0)    # amarelo: da raiz até o vaso escolhido
+COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
+COR_APAGADO = (0.78, 0.79, 0.82)  # demais vasos ficam cinza, para o realce aparecer
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
@@ -224,10 +228,16 @@ class Estado:
 
     # ---------------------------------------------------------------- seleção
     def cores_com_selecao(self):
-        cores = self.cores_base.copy()
-        if self.selecionado is not None:
-            cores[self.seg_id == self.selecionado] = COR_SELECAO
-        return cores
+        """Sem seleção: cores normais. Com seleção: o resto fica cinza e se
+        destacam o caminho até a raiz, a subárvore irrigada e o próprio vaso."""
+        if self.selecionado is None:
+            return self.cores_base.copy()
+        ter = metricas.territorio(self.arvore, self.metricas, self.selecionado)
+        cor_do_vaso = np.tile(COR_APAGADO, (self.arvore.n_segmentos, 1))
+        cor_do_vaso[ter["caminho"]] = COR_CAMINHO
+        cor_do_vaso[ter["subarvore"]] = COR_SUBARVORE
+        cor_do_vaso[self.selecionado] = COR_SELECAO
+        return np.ascontiguousarray(cor_do_vaso[self.seg_id], dtype=np.float32)
 
     def selecionar(self, px, py):
         """Ray Casting: raio pelo pixel clicado e primeiro vaso atingido."""
@@ -257,9 +267,14 @@ class Estado:
         a, b = arv.pontos[arv.segmentos[self.selecionado]]
         comprimento = np.linalg.norm(b - a) / MM_PARA_M
         geracao = self.metricas["geracao"][self.selecionado]
-        return (f"vaso {self.selecionado} | geração {geracao} | "
-                f"raio {arv.raios[self.selecionado]:.3f} mm | "
-                f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}").replace(".", ",")
+        ter = metricas.territorio(arv, self.metricas, self.selecionado)
+        linha1 = (f"vaso {self.selecionado} | geração {geracao} | "
+                  f"raio {arv.raios[self.selecionado]:.3f} mm | "
+                  f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}")
+        linha2 = (f"irriga {ter['terminais']} de {self.metricas['n_terminais']} terminais "
+                  f"({100 * ter['fracao_fluxo']:.1f}% do fluxo) | subárvore com "
+                  f"{100 * ter['fracao_volume']:.1f}% do volume dos vasos")
+        return (linha1 + "\n" + linha2).replace(".", ",")
 
     def enviar_para_gpu(self):
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
@@ -668,11 +683,24 @@ def desenhar_quadro(estado, fonte):
         linhas = [" " + l + " " for l in
                   metricas.linhas_painel(estado.arvore, estado.metricas, filtro)]
         x = LARGURA - max(fonte.size(l)[0] for l in linhas) - 8     # alinhado à direita
+        topo = ALTURA - (170 if estado.selecionado is not None else 120)
         for i, linha in enumerate(linhas):
-            desenhar_texto(fonte, linha, x, ALTURA - 120 - 22 * i, (245, 247, 250))
+            desenhar_texto(fonte, linha, x, topo - 22 * i, (245, 247, 250))
     info = estado.info_selecao()
     if info:                                  # painel do vaso selecionado, no topo
-        desenhar_texto(fonte, " selecionado: " + info + " ", 10, ALTURA - 92, (255, 255, 255))
+        l1, l2 = info.split("\n")
+        desenhar_texto(fonte, " selecionado: " + l1 + " ", 10, ALTURA - 92, (255, 255, 255))
+        desenhar_texto(fonte, " " + l2 + " ", 10, ALTURA - 114, (255, 255, 255))
+        legenda = [("vaso", COR_SELECAO), ("caminho até a raiz", COR_CAMINHO),
+                   ("irrigado por ele", COR_SUBARVORE)]
+        x = 10
+        for texto, cor in legenda:            # quadradinhos coloridos da legenda
+            glColor3f(*cor)
+            glWindowPos2d(x, ALTURA - 133)
+            glDrawPixels(12, 12, GL_RGB, GL_UNSIGNED_BYTE,
+                         np.full((12, 12, 3), [int(255 * c) for c in cor], dtype=np.uint8))
+            desenhar_texto(fonte, texto, x + 16, ALTURA - 136)
+            x += 22 + fonte.size(texto)[0] + 14
 
 
 # -------------------------------------------------------------------- entrada
