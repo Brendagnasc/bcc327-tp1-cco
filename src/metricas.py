@@ -41,6 +41,7 @@ def analisar(arvore):
     # BFS: geração de cada segmento e segmento pai
     geracao = np.full(len(seg), -1)
     pai = np.full(len(seg), -1)
+    proximal = np.full(len(seg), -1)        # ponta do vaso do lado da raiz (por onde o sangue entra)
     fila = deque([(raiz, -1, -1)])          # (ponto, segmento de chegada, geração dele)
     visitado = np.zeros(n, dtype=bool)
     visitado[raiz] = True
@@ -51,6 +52,7 @@ def analisar(arvore):
                 visitado[q] = True
                 geracao[k] = g + 1
                 pai[k] = s_chegada
+                proximal[k] = p
                 fila.append((q, k, g + 1))
 
     comprimento = np.linalg.norm(pts[seg[:, 1]] - pts[seg[:, 0]], axis=1) * MM   # mm
@@ -70,6 +72,7 @@ def analisar(arvore):
     return {
         "raiz": raiz,
         "pai": pai,
+        "proximal": proximal,
         "filhos": filhos,
         "terminais_abaixo": terminais_abaixo,
         "geracao": geracao,
@@ -121,6 +124,27 @@ def territorio(arvore, met, k):
         "caminho": caminho_ate_raiz(met, k),
         "subarvore": sub,
     }
+
+
+def tempos_de_transito(arvore, met):
+    """Instante em que o sangue que sai da raiz chega à entrada de cada vaso.
+
+    Fluxo de um vaso: Q = (terminais abaixo) x q, já que no CCO cada terminal
+    recebe o mesmo fluxo q. Velocidade média: v = Q / (pi r^2). O tempo para
+    atravessar o vaso é L / v, e o tempo de chegada se acumula da raiz para
+    as pontas: tau_entrada(filho) = tau_entrada(pai) + L_pai / v_pai.
+    As unidades são arbitrárias (q = 1); a animação normaliza depois.
+    Retorna (tau na entrada, duração da travessia) de cada vaso.
+    """
+    r = arvore.raios
+    velocidade = met["terminais_abaixo"] / (np.pi * r ** 2)
+    travessia = met["comprimento"] / velocidade
+    entrada = np.zeros(len(r))
+    for k in np.argsort(met["geracao"]):                # da raiz para as pontas
+        p = met["pai"][k]
+        if p >= 0:
+            entrada[k] = entrada[p] + travessia[p]
+    return entrada, travessia
 
 
 def linhas_painel(arvore, met, visiveis=None):
