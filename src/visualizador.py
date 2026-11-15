@@ -2,9 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 1: o clique num vaso acende o caminho até a raiz e a
-subárvore que ele irriga, com a fração do fluxo e do volume. Mantém tudo do
-TP2 (visibilidade, iluminação, transparência, textura, Ray Casting, filtro).
+Versão portfólio 2: fluxo de sangue animado (pulsos saindo da raiz, com a
+velocidade de cada vaso) e clique que acende o caminho até a raiz e a
+subárvore irrigada. Mantém tudo do TP2.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -41,6 +41,7 @@ Teclas e mouse:
     I                      modo intervalo: setas esquerda/direita mudam o raio mínimo
                            e baixo/cima o raio máximo exibido (I de novo volta ao normal)
     J                      mostra / esconde o painel de métricas da árvore
+    W                      liga / desliga o fluxo de sangue animado (usa o Phong)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -78,6 +79,9 @@ COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
 COR_CAMINHO = (1.0, 0.82, 0.0)    # amarelo: da raiz até o vaso escolhido
 COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
 COR_APAGADO = (0.78, 0.79, 0.82)  # demais vasos ficam cinza, para o realce aparecer
+COR_SANGUE = (0.55, 0.06, 0.07)   # cor dos vasos no modo fluxo
+FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
+DURACAO_ARVORE = 2.0              # segundos para o pulso ir da raiz ao terminal mais distante
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
@@ -132,6 +136,9 @@ class Estado:
         self.filtro_max = float(arvore.raios.max())
         self.painel = True
         self.metricas = metricas.analisar(arvore)
+        self.fluxo = False
+        self.tempo = 0.0
+        self.tau = None
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -186,7 +193,7 @@ class Estado:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
         raio = arv.raios * MM_PARA_M * self.exagero
-        self.normais = self.normais_face = None
+        self.normais = self.normais_face = self.tau = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
             seg_id = np.repeat(np.arange(arv.n_segmentos), 2)
@@ -199,6 +206,7 @@ class Estado:
         else:                                 # 3D: tubos com normais para iluminação
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
             self.normais_face = normais_de_face(self.vertices, self.normais)
+            self.tau = self.tau_dos_vertices(seg_id)
             self.cores = cores_seg[seg_id]
             # dados por triângulo para o culling próprio: normal e centroide
             self.tri_normal = self.normais_face[::3].astype(float)
@@ -210,6 +218,34 @@ class Estado:
         self.cores_base = np.ascontiguousarray(self.cores, dtype=np.float32)
         self.cores = self.cores_com_selecao()
         self.enviar_para_gpu()
+
+    # ---------------------------------------------------------------- fluxo
+    def tau_dos_vertices(self, seg_id):
+        """Instante de chegada do pulso em cada vértice dos tubos.
+
+        O vértice é projetado no eixo do seu vaso, da ponta proximal (do lado
+        da raiz) para a distal: s em [0, 1]. Então
+            tau = tau_entrada + s * duração_da_travessia
+        e tudo é escalado para o pulso levar DURACAO_ARVORE segundos até o
+        terminal mais distante.
+        """
+        arv, met = self.arvore, self.metricas
+        entrada, travessia = metricas.tempos_de_transito(arv, met)
+        a, b = arv.segmentos[:, 0], arv.segmentos[:, 1]
+        prox = np.where(met["proximal"] == a, a, b)
+        dist = np.where(met["proximal"] == a, b, a)
+        A, B = arv.pontos[prox][seg_id], arv.pontos[dist][seg_id]
+        eixo = B - A
+        s = ((self.vertices - A) * eixo).sum(axis=1) / (eixo * eixo).sum(axis=1)
+        tau = entrada[seg_id] + np.clip(s, 0.0, 1.0) * travessia[seg_id]
+        return (tau / (entrada + travessia).max() * DURACAO_ARVORE).astype(np.float32)
+
+    def atualizar_cores(self):
+        """Recalcula as cores (seleção / fluxo) e reenvia só o VBO de cores."""
+        self.cores = self.cores_com_selecao()
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbos[1])
+        glBufferData(GL_ARRAY_BUFFER, self.cores.nbytes, self.cores, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     # ---------------------------------------------------------------- filtro
     def visiveis(self):
@@ -231,6 +267,9 @@ class Estado:
         """Sem seleção: cores normais. Com seleção: o resto fica cinza e se
         destacam o caminho até a raiz, a subárvore irrigada e o próprio vaso."""
         if self.selecionado is None:
+            if self.fluxo and self.normais is not None:
+                return np.ascontiguousarray(np.tile(COR_SANGUE, (len(self.vertices), 1)),
+                                            dtype=np.float32)
             return self.cores_base.copy()
         ter = metricas.territorio(self.arvore, self.metricas, self.selecionado)
         cor_do_vaso = np.tile(COR_APAGADO, (self.arvore.n_segmentos, 1))
@@ -251,11 +290,7 @@ class Estado:
             Om, Dm, arv.pontos, arv.segmentos[idx], raio[idx])
         self.selecionado = None if i is None else int(idx[i])
         self.ponto_selecao = None if self.t_selecao is None else O + self.t_selecao * D
-        # só a cor muda: reenvia apenas o VBO de cores
-        self.cores = self.cores_com_selecao()
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbos[1])
-        glBufferData(GL_ARRAY_BUFFER, self.cores.nbytes, self.cores, GL_STATIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.atualizar_cores()            # só a cor muda: reenvia apenas o VBO de cores
         print(f"raio O = {np.round(O, 3)}  D = {np.round(D / np.linalg.norm(D), 3)}  ->  "
               + ("nenhum vaso" if self.selecionado is None else
                  f"vaso {self.selecionado}, t = {self.t_selecao:.4f}"))
@@ -280,10 +315,10 @@ class Estado:
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
-            self.vbos = glGenBuffers(4)     # posição, cor, normal do vértice, normal da face
+            self.vbos = glGenBuffers(5)     # posição, cor, normal, normal da face, tau
             self.ebo = glGenBuffers(1)      # índices dos triângulos visíveis (culling próprio)
         for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
-                                          self.normais_face)):
+                                          self.normais_face, self.tau)):
             if dados is not None:
                 dados = np.ascontiguousarray(dados, dtype=np.float32)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -313,7 +348,8 @@ class Estado:
             if OPACIDADES[self.opacidade] < 1.0:
                 texto += (f" | opacidade {OPACIDADES[self.opacidade]:.1f}".replace(".", ",")
                           + f" | ordem: {ORDENS[self.ordem]}")
-            texto += (f"\n{self.sombreamento} | {COMPONENTES[self.componentes]} | "
+            somb = "Phong (fluxo animado)" if self.fluxo else self.sombreamento
+            texto += (f"\n{somb} | {COMPONENTES[self.componentes]} | "
                       f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
                       f"x{self.intensidade:.1f}")
             if self.modo_luz:
@@ -360,7 +396,8 @@ def desenhar_arvore(estado):
 def desenhar_com_shader(estado, modelview):
     """Tubos: as matrizes do grupo e a luz vão como uniforms e a iluminação
     é calculada pelos nossos shaders, sem o pipeline fixo."""
-    prog = programas[estado.sombreamento]
+    em_fluxo = estado.fluxo and estado.tau is not None
+    prog = programas["Phong" if em_fluxo else estado.sombreamento]
     prog.usar()
     prog.mat4("u_projecao", estado.matriz_projecao())
     prog.mat4("u_modelview", modelview)
@@ -371,13 +408,22 @@ def desenhar_com_shader(estado, modelview):
     # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
     # recebe as normais de FACE em vez das normais dos vértices.
     prog.float("u_destacar_tras", 1.0 if estado.destacar_tras else 0.0)
+    if em_fluxo:
+        prog.float("u_fluxo", 1.0)
+        prog.float("u_tempo", estado.tempo)
+        prog.float("u_frequencia", FREQUENCIA)
+    elif "Phong" in programas and prog is programas["Phong"]:
+        prog.float("u_fluxo", 0.0)
 
-    vbo_v, vbo_c, vbo_n, vbo_nf = estado.vbos
-    vbo_normal = vbo_nf if estado.sombreamento == "Flat" else vbo_n
+    vbo_v, vbo_c, vbo_n, vbo_nf, vbo_tau = estado.vbos
+    vbo_normal = vbo_nf if (estado.sombreamento == "Flat" and not em_fluxo) else vbo_n
     for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
         glEnableVertexAttribArray(local)
         glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_tau)       # tau: 1 float por vértice (location 3)
+    glEnableVertexAttribArray(3)
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 0, None)
 
     total = len(estado.vertices) // 3
     modo = CULLING[estado.culling]
@@ -424,7 +470,7 @@ def desenhar_com_shader(estado, modelview):
     glDepthMask(GL_TRUE)
     glDisable(GL_CULL_FACE)
 
-    for local in range(3):
+    for local in range(4):
         glDisableVertexAttribArray(local)
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glUseProgram(0)
@@ -767,6 +813,9 @@ def tratar_tecla(estado, tecla):
         estado.modo_luz = False
     elif tecla == pygame.K_j:
         estado.painel = not estado.painel
+    elif tecla == pygame.K_w:
+        estado.fluxo = not estado.fluxo
+        estado.atualizar_cores()
     elif tecla == pygame.K_y:
         # o ray tracer roda em outro processo, sem travar o visualizador
         subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
@@ -887,6 +936,7 @@ def main():
                 fator = 0.9 if evento.y > 0 else 1 / 0.9
                 estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
+        estado.tempo = pygame.time.get_ticks() / 1000.0
         desenhar_quadro(estado, fonte)
         if salvar:
             capturar(nome_captura(estado))
