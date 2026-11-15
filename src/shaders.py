@@ -117,15 +117,34 @@ void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
 # O vertex shader só repassa posição e normal; o rasterizador interpola
 # as NORMAIS e a iluminação é feita por PIXEL no fragment shader.
 PHONG_VERT = CABECALHO_VERT + """
+layout(location = 3) in float a_tau;    // instante em que o sangue chega a este vértice
 out vec3 v_pos;
 out vec3 v_normal;
 out vec3 v_cor;
+out float v_tau;
 void main() {
     vec4 pos = u_modelview * vec4(a_posicao, 1.0);
     gl_Position = u_projecao * pos;
     v_pos = pos.xyz;
     v_normal = u_normal * a_normal;
     v_cor = a_cor;
+    v_tau = a_tau;
+}
+"""
+
+# Fluxo animado: pulsos saem da raiz a cada batimento e descem pelos vasos.
+# fase = tempo desde a passagem do último pulso por este ponto, em batimentos:
+#   fase = fract((tempo - tau) * frequência)
+# O brilho é máximo quando o pulso acaba de chegar (fase = 0) e decai depois.
+FLUXO = """
+uniform float u_fluxo;          // 1 liga a animação
+uniform float u_tempo;          // segundos desde o início
+uniform float u_frequencia;     // batimentos por segundo
+vec3 aplicar_fluxo(vec3 cor, float tau) {
+    if (u_fluxo < 0.5) return cor;
+    float fase = fract((u_tempo - tau) * u_frequencia);
+    float pulso = exp(-fase * 9.0);
+    return cor * (0.55 + 0.45 * pulso) + vec3(1.0, 0.45, 0.35) * 0.6 * pulso;
 }
 """
 PHONG_FRAG = """
@@ -133,9 +152,13 @@ PHONG_FRAG = """
 in vec3 v_pos;
 in vec3 v_normal;            // interpolada: precisa ser renormalizada
 in vec3 v_cor;
+in float v_tau;
 out vec4 f_cor;
-""" + ILUMINACAO + DESTAQUE + """
-void main() { f_cor = destacar(vec4(iluminar(v_normal, v_pos, v_cor), 1.0)); }
+""" + ILUMINACAO + DESTAQUE + FLUXO + """
+void main() {
+    vec3 cor = aplicar_fluxo(v_cor, v_tau);
+    f_cor = destacar(vec4(iluminar(v_normal, v_pos, cor), 1.0));
+}
 """
 
 FONTES = {
