@@ -138,6 +138,7 @@ class Estado:
         self.metricas = metricas.analisar(arvore)
         self.fluxo = False
         self.tempo = 0.0
+        self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
         self.tau = None
         self.primitiva = GL_LINES
 
@@ -720,6 +721,8 @@ def desenhar_quadro(estado, fonte):
         mostrar_profundidade(estado)
 
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
+    if not estado.hud:
+        return
     if estado.modo != 2:
         desenhar_barra_cores(estado, fonte)
     for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
