@@ -2,7 +2,7 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 3: animação de crescimento geração por geração, fluxo de
+Versão portfólio 4: tela de ajuda (H), animação de crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
 irrigada. Mantém tudo do TP2.
 
@@ -43,6 +43,7 @@ Teclas e mouse:
     J                      mostra / esconde o painel de métricas da árvore
     W                      liga / desliga o fluxo de sangue animado (usa o Phong)
     Espaço                 anima o crescimento da árvore, geração por geração
+    H                      mostra / esconde a tela de ajuda com todos os atalhos
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -142,6 +143,7 @@ class Estado:
         self.inicio_crescimento = None  # instante em que a animação começou (None = parada)
         self.tempo = 0.0
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
+        self.ajuda = False
         self.tau = None
         self.primitiva = GL_LINES
 
@@ -609,9 +611,9 @@ def desenhar_eixos(estado):
     glLineWidth(2.0)
 
 
-def desenhar_texto(fonte, texto, x, y, fundo=None):
+def desenhar_texto(fonte, texto, x, y, fundo=None, cor=(20, 20, 20)):
     """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
-    superficie = fonte.render(texto, True, (20, 20, 20), fundo)
+    superficie = fonte.render(texto, True, cor, fundo)
     dados = pygame.image.tobytes(superficie, "RGBA", True)
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
@@ -753,6 +755,9 @@ def desenhar_quadro(estado, fonte):
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
     if not estado.hud:
         return
+    if estado.ajuda:                          # a ajuda substitui os outros textos
+        desenhar_ajuda()
+        return
     if estado.modo != 2:
         desenhar_barra_cores(estado, fonte)
     for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
@@ -765,6 +770,8 @@ def desenhar_quadro(estado, fonte):
         topo = ALTURA - (170 if estado.selecionado is not None else 120)
         for i, linha in enumerate(linhas):
             desenhar_texto(fonte, linha, x, topo - 22 * i, (245, 247, 250))
+    dica = fonte.render("H  ajuda", True, (20, 20, 20))
+    desenhar_texto(fonte, " H  ajuda ", LARGURA - dica.get_width() - 22, 10, (255, 230, 150))
     info = estado.info_selecao()
     if info:                                  # painel do vaso selecionado, no topo
         l1, l2 = info.split("\n")
@@ -780,6 +787,79 @@ def desenhar_quadro(estado, fonte):
                          np.full((12, 12, 3), [int(255 * c) for c in cor], dtype=np.uint8))
             desenhar_texto(fonte, texto, x + 16, ALTURA - 136)
             x += 22 + fonte.size(texto)[0] + 14
+
+
+# -------------------------------------------------------------------- ajuda
+# (tecla, descrição) agrupados por tema; a tela é montada a partir desta lista
+AJUDA = [
+    ("Navegar", [
+        ("arrastar", "girar a árvore"), ("roda do mouse", "aproximar / afastar"),
+        ("1  2  3  4", "vistas predefinidas"),
+        ("P", "perspectiva / ortográfica"), ("setas, PgUp, PgDn", "mover a árvore"),
+        ("Z  X", "girar em torno de z"), (",  .", "diminuir / aumentar"),
+        ("R", "voltar ao início"),
+    ]),
+    ("Ver a árvore funcionando", [
+        ("Espaço", "crescimento, geração por geração"), ("W", "fluxo de sangue"),
+        ("clique direito", "vaso, caminho e o que irriga"),
+        ("I + setas", "filtrar vasos por raio"), ("J", "painel de métricas"),
+    ]),
+    ("Aparência", [
+        ("E", "linhas / tubos / tubos sólidos"), ("C", "mapa de cores"),
+        ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
+        ("K", "componentes da luz"), ("L + setas", "mover a luz"),
+        ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
+        ("M", "antialiasing MSAA"),
+    ]),
+    ("Técnicas de visibilidade", [
+        ("B", "Back-Face Culling"), ("D", "Z-Buffer"), ("V", "ver o Z-Buffer"),
+        ("F", "faces de trás em vermelho"), ("N", "ordem dos transparentes"),
+    ]),
+    ("Outros", [
+        ("Y", "mini Ray Tracer"), ("S", "salvar imagem"), ("A", "eixos do mundo"),
+        ("H", "fechar esta ajuda"), ("ESC", "fechar a ajuda / sair"),
+    ]),
+]
+_fontes_ajuda = {}
+
+
+def desenhar_ajuda():
+    """Painel escuro semitransparente com os atalhos, em duas colunas."""
+    if not _fontes_ajuda:
+        _fontes_ajuda["titulo"] = pygame.font.Font(None, 34)
+        _fontes_ajuda["grupo"] = pygame.font.Font(None, 25)
+        _fontes_ajuda["grupo"].set_bold(True)
+        _fontes_ajuda["texto"] = pygame.font.Font(None, 22)
+    f_tit, f_grupo, f_txt = _fontes_ajuda["titulo"], _fontes_ajuda["grupo"], _fontes_ajuda["texto"]
+
+    # fundo: retângulo escuro com alfa 0,88 sobre a cena (composição alfa),
+    # centralizado na vertical com a altura do conteúdo
+    m, altura = 40, 660
+    topo, base = (ALTURA + altura) // 2, (ALTURA - altura) // 2
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, LARGURA, 0, ALTURA, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glColor4f(0.08, 0.14, 0.24, 0.88)
+    glBegin(GL_QUADS)
+    glVertex2f(m, base); glVertex2f(LARGURA - m, base)
+    glVertex2f(LARGURA - m, topo); glVertex2f(m, topo)
+    glEnd()
+
+    branco, cinza, amarelo = (255, 255, 255), (190, 205, 225), (255, 210, 80)
+    desenhar_texto(f_tit, "Atalhos", m + 24, topo - 44, cor=branco)
+    colunas = [AJUDA[:2] + AJUDA[4:], AJUDA[2:4]]
+    for c, grupos in enumerate(colunas):
+        x = m + 24 + c * (LARGURA - 2 * m) // 2
+        y = topo - 88
+        for nome, itens in grupos:
+            desenhar_texto(f_grupo, nome, x, y, cor=amarelo)
+            y -= 28
+            for tecla, descricao in itens:
+                desenhar_texto(f_txt, tecla, x, y, cor=branco)
+                desenhar_texto(f_txt, descricao, x + 150, y, cor=cinza)
+                y -= 23
+            y -= 14
 
 
 # -------------------------------------------------------------------- entrada
@@ -958,7 +1038,12 @@ def main():
                 rodando = False
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
-                    rodando = False
+                    if estado.ajuda:
+                        estado.ajuda = False        # primeiro ESC só fecha a ajuda
+                    else:
+                        rodando = False
+                elif evento.key == pygame.K_h:
+                    estado.ajuda = not estado.ajuda
                 elif evento.key == pygame.K_s:
                     salvar = True
                 else:
