@@ -2,7 +2,7 @@
 gravar_demo.py
 
 Grava a demonstração curta que aparece no topo do README (demo/demo.gif e
-demo/demo.mp4): rotação da árvore, fluxo de sangue, clique num vaso,
+demo/demo.mp4): crescimento da árvore, fluxo de sangue, clique num vaso,
 transparência, filtro por raio e o mini Ray Tracer.
 
 Cada cena é uma função que ajusta o Estado do visualizador quadro a quadro;
@@ -154,8 +154,15 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         g = Gravador(Path(tmp))
 
+        # 0. crescimento, geração por geração (mais rápido que no programa)
+        vis.DURACAO_CRESCIMENTO = 4.0
+        estado.inicio_crescimento = 0.0
+        g.cena(estado, 4.3, "Crescimento da árvore, geração por geração",
+               lambda e: (f"geração {min(int(e.nivel_crescimento() or 99), estado.metricas['geracao_max'])}"
+                          f" de {estado.metricas['geracao_max']}"))
+
         # 1. a árvore
-        g.cena(estado, 2.5, "Árvore arterial sintética (método CCO)",
+        g.cena(estado, 1.5, "Árvore arterial sintética (método CCO)",
                f"{n_vasos} vasos, {n_term} terminais | cor e espessura pelo raio")
 
         # 2. fluxo

@@ -120,6 +120,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `I` | Modo intervalo: `←`/`→` mudam o raio mínimo, `↓`/`↑` o máximo (`I` de novo sai) |
 | `J` | Painel de métricas da árvore |
 | `W` | Fluxo de sangue animado |
+| `Espaço` | Anima o crescimento da árvore, geração por geração |
 
 ### Mini Ray Tracer
 
