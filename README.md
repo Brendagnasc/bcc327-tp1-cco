@@ -1,9 +1,16 @@
-# TP2 · Visualização 3D Avançada de Árvores CCO: Visibilidade, Iluminação e Técnicas Baseadas em Raios
+# Árvores arteriais CCO em 3D
 
-**BCC327 – Computação Gráfica · UFOP · 2026.2**
-Prof. Dr. Rafael Alves Bonfim de Queiroz
+<p align="center">
+  <img src="demo/demo.gif" alt="Demonstração: rotação da árvore, fluxo de sangue, clique num vaso, transparência, filtro por raio e ray tracer" width="380">
+</p>
 
-> Este README descreve o TP2, desenvolvido na branch `tp2`. O TP1 permanece na branch `main`.
+Visualizador 3D de **árvores arteriais sintéticas**, redes de vasos sanguíneos geradas por computador pelo método CCO (*Constrained Constructive Optimization*). Cada vaso é desenhado como um tubo com a espessura do seu raio real; o sangue pulsa da raiz até as pontas, e um clique num vaso mostra de onde vem o sangue dele e tudo o que ele irriga.
+
+Feito em Python com OpenGL, com shaders, câmera, Ray Casting e um mini Ray Tracer escritos do zero. Vídeo em melhor qualidade: [`demo/demo.mp4`](demo/demo.mp4).
+
+**BCC327 – Computação Gráfica · UFOP · 2026.2** · Prof. Dr. Rafael Alves Bonfim de Queiroz
+
+> Branch `portfolio`: evolução do TP2 para portfólio. O TP1 está na branch `main` e o TP2, como entregue, na branch `tp2`.
 
 ## Integrantes
 
@@ -68,6 +75,7 @@ python src/metricas.py data/tree3D_*.vtk     # bifurcações, terminais, geraç�
 python src/raycasting.py                     # exemplo de interseção raio-cilindro
 python src/textura.py                        # exemplo de NEAREST x bilinear num ponto (u, v)
 python src/gerar_figuras.py                  # regera as 34 figuras em report/figures/
+python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo.mp4 (precisa do ffmpeg)
 ```
 
 ## Comandos do visualizador
@@ -107,10 +115,11 @@ python src/gerar_figuras.py                  # regera as 34 figuras em report/fi
 | `N` | Ordem dos transparentes: Painter's / sem ordenação |
 | `T` | Plano de referência com textura |
 | `U` | Filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / coordenadas (u, v) |
-| Clique direito | Seleciona o vaso por Ray Casting (mostra geração, raio e comprimento) |
+| Clique direito | Seleciona o vaso por Ray Casting: acende o caminho até a raiz (amarelo) e a subárvore que ele irriga (verde), com a fração do fluxo e do volume |
 | `Y` | Abre o mini Ray Tracer |
 | `I` | Modo intervalo: `←`/`→` mudam o raio mínimo, `↓`/`↑` o máximo (`I` de novo sai) |
 | `J` | Painel de métricas da árvore |
+| `W` | Fluxo de sangue animado |
 
 ### Mini Ray Tracer
 
