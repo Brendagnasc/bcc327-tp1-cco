@@ -121,6 +121,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `J` | Painel de métricas da árvore |
 | `W` | Fluxo de sangue animado |
 | `Espaço` | Anima o crescimento da árvore, geração por geração |
+| `H` | Tela de ajuda com todos os atalhos (`ESC` fecha) |
 
 ### Mini Ray Tracer
 
@@ -133,6 +134,8 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 ## Roteiro mínimo de teste
 
 Segue o roteiro de integração do enunciado:
+
+Dentro do programa, `H` mostra todos os atalhos.
 
 1. **Carregar uma árvore:** `python src/visualizador.py data/tree3D_Nterm128.vtk`.
 2. **Navegar:** arrastar, roda do mouse, vistas `1` a `4`.
