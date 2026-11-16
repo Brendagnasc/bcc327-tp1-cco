@@ -118,10 +118,12 @@ void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
 # as NORMAIS e a iluminação é feita por PIXEL no fragment shader.
 PHONG_VERT = CABECALHO_VERT + """
 layout(location = 3) in float a_tau;    // instante em que o sangue chega a este vértice
+layout(location = 4) in float a_ordem;  // geração do vaso + posição ao longo dele (crescimento)
 out vec3 v_pos;
 out vec3 v_normal;
 out vec3 v_cor;
 out float v_tau;
+out float v_ordem;
 void main() {
     vec4 pos = u_modelview * vec4(a_posicao, 1.0);
     gl_Position = u_projecao * pos;
@@ -129,6 +131,7 @@ void main() {
     v_normal = u_normal * a_normal;
     v_cor = a_cor;
     v_tau = a_tau;
+    v_ordem = a_ordem;
 }
 """
 
@@ -147,16 +150,31 @@ vec3 aplicar_fluxo(vec3 cor, float tau) {
     return cor * (0.55 + 0.45 * pulso) + vec3(1.0, 0.45, 0.35) * 0.6 * pulso;
 }
 """
+
+# Crescimento: cada fragmento tem ordem = geração + s (s de 0 a 1 ao longo do
+# vaso, da base para a ponta). Só aparece o que tem ordem <= nível atual, então
+# cada vaso "cresce" da base até a ponta e só depois os filhos começam.
+CRESCIMENTO = """
+uniform float u_crescendo;      // 1 enquanto a animação de crescimento roda
+uniform float u_nivel;          // até que ordem a árvore já cresceu
+vec3 aplicar_crescimento(vec3 cor, float ordem) {
+    if (u_crescendo < 0.5) return cor;
+    if (ordem > u_nivel) discard;                     // ainda não cresceu
+    float frente = 1.0 - smoothstep(0.0, 0.35, u_nivel - ordem);
+    return mix(cor, vec3(1.0, 0.95, 0.75), 0.8 * frente);   // ponta que cresce brilha
+}
+"""
 PHONG_FRAG = """
 #version 330 core
 in vec3 v_pos;
 in vec3 v_normal;            // interpolada: precisa ser renormalizada
 in vec3 v_cor;
 in float v_tau;
+in float v_ordem;
 out vec4 f_cor;
-""" + ILUMINACAO + DESTAQUE + FLUXO + """
+""" + ILUMINACAO + DESTAQUE + FLUXO + CRESCIMENTO + """
 void main() {
-    vec3 cor = aplicar_fluxo(v_cor, v_tau);
+    vec3 cor = aplicar_crescimento(aplicar_fluxo(v_cor, v_tau), v_ordem);
     f_cor = destacar(vec4(iluminar(v_normal, v_pos, cor), 1.0));
 }
 """
