@@ -2,9 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 2: fluxo de sangue animado (pulsos saindo da raiz, com a
-velocidade de cada vaso) e clique que acende o caminho até a raiz e a
-subárvore irrigada. Mantém tudo do TP2.
+Versão portfólio 3: animação de crescimento geração por geração, fluxo de
+sangue animado e clique que acende o caminho até a raiz e a subárvore
+irrigada. Mantém tudo do TP2.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
@@ -42,6 +42,7 @@ Teclas e mouse:
                            e baixo/cima o raio máximo exibido (I de novo volta ao normal)
     J                      mostra / esconde o painel de métricas da árvore
     W                      liga / desliga o fluxo de sangue animado (usa o Phong)
+    Espaço                 anima o crescimento da árvore, geração por geração
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -81,6 +82,7 @@ COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
 COR_APAGADO = (0.78, 0.79, 0.82)  # demais vasos ficam cinza, para o realce aparecer
 COR_SANGUE = (0.55, 0.06, 0.07)   # cor dos vasos no modo fluxo
 FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
+DURACAO_CRESCIMENTO = 7.0         # segundos para a árvore crescer da raiz às pontas
 DURACAO_ARVORE = 2.0              # segundos para o pulso ir da raiz ao terminal mais distante
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis"]
@@ -137,6 +139,7 @@ class Estado:
         self.painel = True
         self.metricas = metricas.analisar(arvore)
         self.fluxo = False
+        self.inicio_crescimento = None  # instante em que a animação começou (None = parada)
         self.tempo = 0.0
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
         self.tau = None
@@ -194,7 +197,7 @@ class Estado:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
         raio = arv.raios * MM_PARA_M * self.exagero
-        self.normais = self.normais_face = self.tau = None
+        self.normais = self.normais_face = self.tau = self.ordem_crescimento = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
             seg_id = np.repeat(np.arange(arv.n_segmentos), 2)
@@ -207,7 +210,9 @@ class Estado:
         else:                                 # 3D: tubos com normais para iluminação
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
             self.normais_face = normais_de_face(self.vertices, self.normais)
-            self.tau = self.tau_dos_vertices(seg_id)
+            s = self.posicao_no_vaso(seg_id)
+            self.tau = self.tau_dos_vertices(seg_id, s)
+            self.ordem_crescimento = (self.metricas["geracao"][seg_id] + s).astype(np.float32)
             self.cores = cores_seg[seg_id]
             # dados por triângulo para o culling próprio: normal e centroide
             self.tri_normal = self.normais_face[::3].astype(float)
@@ -221,25 +226,40 @@ class Estado:
         self.enviar_para_gpu()
 
     # ---------------------------------------------------------------- fluxo
-    def tau_dos_vertices(self, seg_id):
-        """Instante de chegada do pulso em cada vértice dos tubos.
-
-        O vértice é projetado no eixo do seu vaso, da ponta proximal (do lado
-        da raiz) para a distal: s em [0, 1]. Então
-            tau = tau_entrada + s * duração_da_travessia
-        e tudo é escalado para o pulso levar DURACAO_ARVORE segundos até o
-        terminal mais distante.
-        """
+    def posicao_no_vaso(self, seg_id):
+        """s em [0, 1]: projeção de cada vértice no eixo do seu vaso, da ponta
+        proximal (do lado da raiz) para a distal."""
         arv, met = self.arvore, self.metricas
-        entrada, travessia = metricas.tempos_de_transito(arv, met)
         a, b = arv.segmentos[:, 0], arv.segmentos[:, 1]
         prox = np.where(met["proximal"] == a, a, b)
         dist = np.where(met["proximal"] == a, b, a)
         A, B = arv.pontos[prox][seg_id], arv.pontos[dist][seg_id]
         eixo = B - A
         s = ((self.vertices - A) * eixo).sum(axis=1) / (eixo * eixo).sum(axis=1)
-        tau = entrada[seg_id] + np.clip(s, 0.0, 1.0) * travessia[seg_id]
+        return np.clip(s, 0.0, 1.0)
+
+    def tau_dos_vertices(self, seg_id, s):
+        """Instante de chegada do pulso em cada vértice dos tubos:
+            tau = tau_entrada + s * duração_da_travessia
+        escalado para o pulso levar DURACAO_ARVORE segundos até o terminal
+        mais distante."""
+        entrada, travessia = metricas.tempos_de_transito(self.arvore, self.metricas)
+        tau = entrada[seg_id] + s * travessia[seg_id]
         return (tau / (entrada + travessia).max() * DURACAO_ARVORE).astype(np.float32)
+
+    def nivel_crescimento(self):
+        """Até que 'ordem' a árvore já cresceu, ou None se não há animação.
+
+        O nível vai de 0 a geração_máxima + 1 em DURACAO_CRESCIMENTO segundos;
+        quando passa do fim, a animação termina e a árvore fica completa."""
+        if self.inicio_crescimento is None:
+            return None
+        g_max = self.metricas["geracao_max"] + 1
+        nivel = (self.tempo - self.inicio_crescimento) / DURACAO_CRESCIMENTO * g_max
+        if nivel >= g_max + 0.5:
+            self.inicio_crescimento = None
+            return None
+        return nivel
 
     def atualizar_cores(self):
         """Recalcula as cores (seleção / fluxo) e reenvia só o VBO de cores."""
@@ -316,10 +336,10 @@ class Estado:
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
-            self.vbos = glGenBuffers(5)     # posição, cor, normal, normal da face, tau
+            self.vbos = glGenBuffers(6)     # posição, cor, normal, normal da face, tau, ordem
             self.ebo = glGenBuffers(1)      # índices dos triângulos visíveis (culling próprio)
         for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
-                                          self.normais_face, self.tau)):
+                                          self.normais_face, self.tau, self.ordem_crescimento)):
             if dados is not None:
                 dados = np.ascontiguousarray(dados, dtype=np.float32)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -350,6 +370,10 @@ class Estado:
                 texto += (f" | opacidade {OPACIDADES[self.opacidade]:.1f}".replace(".", ",")
                           + f" | ordem: {ORDENS[self.ordem]}")
             somb = "Phong (fluxo animado)" if self.fluxo else self.sombreamento
+            nivel = self.nivel_crescimento()
+            if nivel is not None:
+                somb = (f"Phong (crescimento: geração {min(int(nivel), self.metricas['geracao_max'])}"
+                        f" de {self.metricas['geracao_max']})")
             texto += (f"\n{somb} | {COMPONENTES[self.componentes]} | "
                       f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
                       f"x{self.intensidade:.1f}")
@@ -398,7 +422,9 @@ def desenhar_com_shader(estado, modelview):
     """Tubos: as matrizes do grupo e a luz vão como uniforms e a iluminação
     é calculada pelos nossos shaders, sem o pipeline fixo."""
     em_fluxo = estado.fluxo and estado.tau is not None
-    prog = programas["Phong" if em_fluxo else estado.sombreamento]
+    nivel = estado.nivel_crescimento()
+    # o fluxo e o crescimento são efeitos do shader Phong
+    prog = programas["Phong" if (em_fluxo or nivel is not None) else estado.sombreamento]
     prog.usar()
     prog.mat4("u_projecao", estado.matriz_projecao())
     prog.mat4("u_modelview", modelview)
@@ -413,18 +439,22 @@ def desenhar_com_shader(estado, modelview):
         prog.float("u_fluxo", 1.0)
         prog.float("u_tempo", estado.tempo)
         prog.float("u_frequencia", FREQUENCIA)
-    elif "Phong" in programas and prog is programas["Phong"]:
+    elif prog is programas["Phong"]:
         prog.float("u_fluxo", 0.0)
+    if prog is programas["Phong"]:
+        prog.float("u_crescendo", 1.0 if nivel is not None else 0.0)
+        prog.float("u_nivel", nivel if nivel is not None else 0.0)
 
-    vbo_v, vbo_c, vbo_n, vbo_nf, vbo_tau = estado.vbos
-    vbo_normal = vbo_nf if (estado.sombreamento == "Flat" and not em_fluxo) else vbo_n
+    vbo_v, vbo_c, vbo_n, vbo_nf, vbo_tau, vbo_ordem = estado.vbos
+    vbo_normal = vbo_nf if prog is programas["Flat"] else vbo_n
     for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
         glEnableVertexAttribArray(local)
         glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_tau)       # tau: 1 float por vértice (location 3)
-    glEnableVertexAttribArray(3)
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 0, None)
+    for local, vbo in ((3, vbo_tau), (4, vbo_ordem)):   # 1 float por vértice
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, 1, GL_FLOAT, GL_FALSE, 0, None)
 
     total = len(estado.vertices) // 3
     modo = CULLING[estado.culling]
@@ -471,7 +501,7 @@ def desenhar_com_shader(estado, modelview):
     glDepthMask(GL_TRUE)
     glDisable(GL_CULL_FACE)
 
-    for local in range(4):
+    for local in range(5):
         glDisableVertexAttribArray(local)
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glUseProgram(0)
@@ -816,6 +846,9 @@ def tratar_tecla(estado, tecla):
         estado.modo_luz = False
     elif tecla == pygame.K_j:
         estado.painel = not estado.painel
+    elif tecla == pygame.K_SPACE:
+        if estado.tau is not None:                  # só nos tubos
+            estado.inicio_crescimento = estado.tempo
     elif tecla == pygame.K_w:
         estado.fluxo = not estado.fluxo
         estado.atualizar_cores()
