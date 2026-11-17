@@ -84,7 +84,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 
 | Entrada | Ação |
 |---|---|
-| Arrastar (botão esquerdo) | Rotação em torno de x e y |
+| Arrastar (botão esquerdo) | Rotação em torno de x e y; soltando em movimento, a árvore segue girando e desacelera |
 | Roda do mouse | Zoom |
 | `Z` / `X` | Rotação em torno de z |
 | Setas, `PageUp` / `PageDown` | Translação |
@@ -123,6 +123,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `Espaço` | Anima o crescimento da árvore, geração por geração |
 | `H` | Tela de ajuda com todos os atalhos (`ESC` fecha) |
 | `Q` | Tema escuro (padrão) / claro |
+| `Tab` | Liga/desliga o giro automático (começa após 6 s sem interação) |
 
 ### Mini Ray Tracer
 
