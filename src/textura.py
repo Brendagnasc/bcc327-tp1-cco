@@ -24,18 +24,20 @@ PLANO_Y = -1.15       # altura do plano (o modelo normalizado ocupa [-1, 1])
 PLANO_MEIO = 1.6      # o plano vai de -1,6 a 1,6 em x e z
 
 
-def gerar_textura(n=TAMANHO):
-    """Quadriculado 4 x 4 em dois tons + círculo do domínio de perfusão."""
+def gerar_textura(n=TAMANHO, escuro=False):
+    """Quadriculado 4 x 4 em dois tons + círculo do domínio de perfusão.
+    escuro=True gera a versão para o tema escuro."""
     j, i = np.mgrid[0:n, 0:n]                      # i = coluna (u), j = linha (v)
     celula = n // 4
     claro = ((i // celula + j // celula) % 2 == 0)
-    img = np.where(claro[..., None], [235, 235, 240], [190, 198, 214]).astype(float)
+    tons = ([58, 64, 80], [40, 45, 58]) if escuro else ([235, 235, 240], [190, 198, 214])
+    img = np.where(claro[..., None], tons[0], tons[1]).astype(float)
 
     # contorno do domínio: o modelo normalizado cabe numa esfera de raio ~1;
     # no plano de meia largura PLANO_MEIO isso vira um círculo de raio n/2/PLANO_MEIO
     r = np.hypot(i + 0.5 - n / 2, j + 0.5 - n / 2)
     raio = n / 2 / PLANO_MEIO
-    img[np.abs(r - raio) < 0.7] = [140, 29, 36]   # vermelho UFOP
+    img[np.abs(r - raio) < 0.7] = [170, 45, 52] if escuro else [140, 29, 36]   # vermelho UFOP
     return img.astype(np.uint8)
 
 
@@ -85,20 +87,24 @@ class PlanoTexturizado:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
         # envia a imagem para a GPU como textura 2D
+        # uma textura para cada tema (claro e escuro)
         self.imagem = gerar_textura()
-        self.tex = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, self.tex)
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, TAMANHO, TAMANHO, 0, GL_RGB,
-                     GL_UNSIGNED_BYTE, np.ascontiguousarray(self.imagem))
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        self.texturas = {}
+        for escuro in (False, True):
+            tex = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, TAMANHO, TAMANHO, 0, GL_RGB,
+                         GL_UNSIGNED_BYTE, np.ascontiguousarray(gerar_textura(escuro=escuro)))
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            self.texturas[escuro] = tex
         glBindTexture(GL_TEXTURE_2D, 0)
 
-    def desenhar(self, filtro_gl):
+    def desenhar(self, filtro_gl, escuro=False):
         """filtro_gl: GL_NEAREST ou GL_LINEAR (o modo próprio usa texelFetch)."""
         glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, self.tex)
+        glBindTexture(GL_TEXTURE_2D, self.texturas[escuro])
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filtro_gl)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filtro_gl)
         for local, vbo, comp in ((0, self.vbo_pos, 3), (1, self.vbo_uv, 2)):

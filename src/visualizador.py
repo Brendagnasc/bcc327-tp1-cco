@@ -2,7 +2,7 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 4: tela de ajuda (H), animação de crescimento, fluxo de
+Versão portfólio 5: tema escuro (Q), tela de ajuda (H), crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
 irrigada. Mantém tudo do TP2.
 
@@ -44,6 +44,7 @@ Teclas e mouse:
     W                      liga / desliga o fluxo de sangue animado (usa o Phong)
     Espaço                 anima o crescimento da árvore, geração por geração
     H                      mostra / esconde a tela de ajuda com todos os atalhos
+    Q                      tema escuro / claro
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -75,12 +76,21 @@ from geometria import faixas_2d, normais_de_face, tubos_3d
 from leitor_vtk import ler_vtk
 
 LARGURA, ALTURA = 900, 900
-FUNDO = (1.0, 1.0, 1.0)
+# Temas de cor: fundo da cena, texto, caixas de texto e marcador de impacto
+TEMAS = {
+    "escuro": {"fundo": (0.07, 0.08, 0.11), "texto": (225, 230, 240),
+               "caixa": (32, 38, 52), "impacto": (1.0, 1.0, 1.0),
+               "apagado": (0.30, 0.32, 0.38)},
+    "claro": {"fundo": (1.0, 1.0, 1.0), "texto": (20, 20, 20),
+              "caixa": (245, 247, 250), "impacto": (0.0, 0.0, 0.0),
+              "apagado": (0.78, 0.79, 0.82)},
+}
+tema = TEMAS["escuro"]         # tema atual (a tecla Q alterna)
+FUNDO = tema["fundo"]
 VERMELHO = (0.8, 0.1, 0.1)
 COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
 COR_CAMINHO = (1.0, 0.82, 0.0)    # amarelo: da raiz até o vaso escolhido
 COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
-COR_APAGADO = (0.78, 0.79, 0.82)  # demais vasos ficam cinza, para o realce aparecer
 COR_SANGUE = (0.55, 0.06, 0.07)   # cor dos vasos no modo fluxo
 FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
 DURACAO_CRESCIMENTO = 7.0         # segundos para a árvore crescer da raiz às pontas
@@ -295,7 +305,7 @@ class Estado:
                                             dtype=np.float32)
             return self.cores_base.copy()
         ter = metricas.territorio(self.arvore, self.metricas, self.selecionado)
-        cor_do_vaso = np.tile(COR_APAGADO, (self.arvore.n_segmentos, 1))
+        cor_do_vaso = np.tile(tema["apagado"], (self.arvore.n_segmentos, 1))
         cor_do_vaso[ter["caminho"]] = COR_CAMINHO
         cor_do_vaso[ter["subarvore"]] = COR_SUBARVORE
         cor_do_vaso[self.selecionado] = COR_SELECAO
@@ -568,7 +578,7 @@ def desenhar_plano(estado):
     prog.int("u_textura", 0)                    # unidade de textura 0
     prog.int("u_modo", estado.filtro)
     filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
-    plano_ref.desenhar(filtro_gl)
+    plano_ref.desenhar(filtro_gl, escuro=tema is TEMAS["escuro"])
     glUseProgram(0)
 
 
@@ -580,7 +590,7 @@ def desenhar_impacto(estado):
     glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
     glPointSize(8.0)
     glBegin(GL_POINTS)
-    glColor3f(0.0, 0.0, 0.0)
+    glColor3f(*tema["impacto"])
     glVertex3f(*estado.ponto_selecao)
     glEnd()
 
@@ -611,9 +621,10 @@ def desenhar_eixos(estado):
     glLineWidth(2.0)
 
 
-def desenhar_texto(fonte, texto, x, y, fundo=None, cor=(20, 20, 20)):
-    """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
-    superficie = fonte.render(texto, True, cor, fundo)
+def desenhar_texto(fonte, texto, x, y, fundo=None, cor=None):
+    """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda).
+    Sem 'cor', usa a cor de texto do tema atual."""
+    superficie = fonte.render(texto, True, cor or tema["texto"], fundo)
     dados = pygame.image.tobytes(superficie, "RGBA", True)
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
@@ -646,13 +657,13 @@ def desenhar_barra_cores(estado, fonte):
         rmin, rmax = arv.raios.min(), arv.raios.max()
         xa = x0 + (estado.filtro_min - rmin) / (rmax - rmin) * (x1 - x0)
         xb = x0 + (estado.filtro_max - rmin) / (rmax - rmin) * (x1 - x0)
-        glColor4f(1.0, 1.0, 1.0, 0.8)
+        glColor4f(*tema["fundo"], 0.8)          # véu da cor do fundo
         glBegin(GL_QUADS)
         for a, b in ((x0, xa), (xb, x1)):
             glVertex2f(a, y0 - 2); glVertex2f(b, y0 - 2)
             glVertex2f(b, y1 + 2); glVertex2f(a, y1 + 2)
         glEnd()
-        glColor3f(0.0, 0.0, 0.0)
+        glColor3f(*[c / 255 for c in tema["texto"]])
         glBegin(GL_LINES)
         for x in (xa, xb):
             glVertex2f(x, y0 - 5); glVertex2f(x, y1 + 5)
@@ -717,7 +728,16 @@ def mostrar_profundidade(estado):
     glDrawPixels(LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(img))
 
 
+def trocar_tema(nome=None):
+    """Alterna (ou escolhe) o tema de cores da interface e da cena."""
+    global tema
+    if nome is None:
+        nome = "claro" if tema is TEMAS["escuro"] else "escuro"
+    tema = TEMAS[nome]
+
+
 def desenhar_quadro(estado, fonte):
+    glClearColor(*tema["fundo"], 1.0)
     # o Z-Buffer é lido da janela; o FBO multiamostrado não pode ser lido direto
     usar_msaa = estado.msaa and estado.fbo_msaa is not None and not estado.ver_profundidade
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
@@ -769,14 +789,15 @@ def desenhar_quadro(estado, fonte):
         x = LARGURA - max(fonte.size(l)[0] for l in linhas) - 8     # alinhado à direita
         topo = ALTURA - (170 if estado.selecionado is not None else 120)
         for i, linha in enumerate(linhas):
-            desenhar_texto(fonte, linha, x, topo - 22 * i, (245, 247, 250))
+            desenhar_texto(fonte, linha, x, topo - 22 * i, tema["caixa"])
     dica = fonte.render("H  ajuda", True, (20, 20, 20))
-    desenhar_texto(fonte, " H  ajuda ", LARGURA - dica.get_width() - 22, 10, (255, 230, 150))
+    desenhar_texto(fonte, " H  ajuda ", LARGURA - dica.get_width() - 22, 10, (255, 210, 80),
+                   (20, 20, 20))
     info = estado.info_selecao()
     if info:                                  # painel do vaso selecionado, no topo
         l1, l2 = info.split("\n")
-        desenhar_texto(fonte, " selecionado: " + l1 + " ", 10, ALTURA - 92, (255, 255, 255))
-        desenhar_texto(fonte, " " + l2 + " ", 10, ALTURA - 114, (255, 255, 255))
+        desenhar_texto(fonte, " selecionado: " + l1 + " ", 10, ALTURA - 92, tema["caixa"])
+        desenhar_texto(fonte, " " + l2 + " ", 10, ALTURA - 114, tema["caixa"])
         legenda = [("vaso", COR_SELECAO), ("caminho até a raiz", COR_CAMINHO),
                    ("irrigado por ele", COR_SUBARVORE)]
         x = 10
@@ -817,7 +838,7 @@ AJUDA = [
     ]),
     ("Outros", [
         ("Y", "mini Ray Tracer"), ("S", "salvar imagem"), ("A", "eixos do mundo"),
-        ("H", "fechar esta ajuda"), ("ESC", "fechar a ajuda / sair"),
+        ("Q", "tema escuro / claro"), ("H", "fechar esta ajuda"), ("ESC", "fechar a ajuda / sair"),
     ]),
 ]
 _fontes_ajuda = {}
@@ -929,6 +950,9 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_q:
+        trocar_tema()
+        estado.atualizar_cores()            # o cinza dos vasos apagados depende do tema
     elif tecla == pygame.K_w:
         estado.fluxo = not estado.fluxo
         estado.atualizar_cores()

@@ -141,6 +141,7 @@ if __name__ == "__main__":
     pygame.display.set_caption("Gerando figuras...")
     fonte = pygame.font.Font(None, 24)
     vis.inicializar_gl()
+    vis.trocar_tema("claro")              # figuras do relatório no tema claro
     figuras_visualizador()
     figuras_raytracer()
     pygame.display.quit()
