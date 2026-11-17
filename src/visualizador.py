@@ -2,7 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 5: tema escuro (Q), tela de ajuda (H), crescimento, fluxo de
+Versão portfólio 6: inércia ao soltar o mouse e giro automático quando
+ninguém está mexendo, tema escuro (Q), tela de ajuda (H), crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
 irrigada. Mantém tudo do TP2.
 
@@ -10,7 +11,8 @@ Uso:
     python src/visualizador.py [arquivo.vtk]
 
 Teclas e mouse:
-    arrastar (botão esq.)  rotação em torno de x e y
+    arrastar (botão esq.)  rotação em torno de x e y; soltando em movimento,
+                           a árvore continua girando e desacelera (inércia)
     clique direito         seleciona o vaso sob o cursor (Ray Casting) e acende
                            o caminho até a raiz e a subárvore que ele irriga;
                            em área vazia, desfaz a seleção
@@ -45,6 +47,8 @@ Teclas e mouse:
     Espaço                 anima o crescimento da árvore, geração por geração
     H                      mostra / esconde a tela de ajuda com todos os atalhos
     Q                      tema escuro / claro
+    Tab                    liga / desliga o giro automático (começa após alguns
+                           segundos sem nenhuma interação)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
     C                      mapa de cores (jet / viridis)
     + -                    exagero da espessura
@@ -92,6 +96,12 @@ COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
 COR_CAMINHO = (1.0, 0.82, 0.0)    # amarelo: da raiz até o vaso escolhido
 COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
 COR_SANGUE = (0.55, 0.06, 0.07)   # cor dos vasos no modo fluxo
+SENSIBILIDADE = 0.5               # graus de rotação por pixel arrastado
+AMORTECIMENTO = 2.5               # quanto maior, mais rápido a inércia para (1/s)
+ESPERA_GIRO = 6.0                 # segundos sem interação até o giro automático
+RAMPA_GIRO = 2.0                  # segundos para o giro automático atingir a velocidade
+VEL_MAX = 360.0                   # velocidade máxima da inércia (graus por segundo)
+VEL_GIRO = 12.0                   # velocidade do giro automático (graus por segundo)
 FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
 DURACAO_CRESCIMENTO = 7.0         # segundos para a árvore crescer da raiz às pontas
 DURACAO_ARVORE = 2.0              # segundos para o pulso ir da raiz ao terminal mais distante
@@ -153,6 +163,10 @@ class Estado:
         self.inicio_crescimento = None  # instante em que a animação começou (None = parada)
         self.tempo = 0.0
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
+        self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
+        self.arraste = np.zeros(2)      # rotação arrastada desde o último quadro
+        self.giro_auto = True
+        self.ultima_interacao = 0.0
         self.ajuda = False
         self.tau = None
         self.primitiva = GL_LINES
@@ -175,6 +189,50 @@ class Estado:
         self.vista = 0
         self.dist = DIST_PADRAO
         self.perspectiva = True
+        if hasattr(self, "vel"):
+            self.vel[:] = 0.0
+
+    # ---------------------------------------------------------------- movimento
+    def arrastar(self, dx, dy):
+        """Rotação pelo mouse; o deslocamento também é guardado para a inércia."""
+        d = np.array([dx, dy]) * SENSIBILIDADE
+        self.ang_y += d[0]
+        self.ang_x += d[1]
+        self.arraste += d
+
+    def interagiu(self):
+        """Qualquer tecla, clique ou arraste interrompe o giro automático."""
+        self.ultima_interacao = self.tempo
+
+    def passo_movimento(self, dt, arrastando):
+        """Avança a inércia e o giro automático em dt segundos.
+
+        Enquanto o botão está pressionado, a velocidade é estimada pelo
+        arraste do quadro (média móvel, para suavizar o tremido da mão).
+        Ao soltar, a árvore continua girando com essa velocidade, que decai
+        exponencialmente:  v(t) = v0 e^(-k t)  ->  a cada quadro, v *= e^(-k dt).
+        """
+        if dt <= 0:
+            return
+        if arrastando:
+            self.ultima_interacao = self.tempo     # botão pressionado conta como uso
+            self.vel = 0.5 * self.vel + 0.5 * (self.arraste / dt)
+            self.vel = np.clip(self.vel, -VEL_MAX, VEL_MAX)   # um "arremesso" sem exagero
+            self.arraste[:] = 0.0
+            return
+        self.arraste[:] = 0.0
+
+        if np.abs(self.vel).max() > 0.5:          # inércia
+            self.ang_y += self.vel[0] * dt
+            self.ang_x += self.vel[1] * dt
+            self.vel *= np.exp(-AMORTECIMENTO * dt)
+            self.ultima_interacao = self.tempo     # ainda está "em uso"
+        else:
+            self.vel[:] = 0.0
+
+        ocioso = self.tempo - self.ultima_interacao
+        if self.giro_auto and ocioso > ESPERA_GIRO:  # giro automático, com rampa suave
+            self.ang_y += VEL_GIRO * min(1.0, (ocioso - ESPERA_GIRO) / RAMPA_GIRO) * dt
 
     # ---------------------------------------------------------------- matrizes
     def matriz_modelo(self):
@@ -814,11 +872,11 @@ def desenhar_quadro(estado, fonte):
 # (tecla, descrição) agrupados por tema; a tela é montada a partir desta lista
 AJUDA = [
     ("Navegar", [
-        ("arrastar", "girar a árvore"), ("roda do mouse", "aproximar / afastar"),
+        ("arrastar", "girar (solte em movimento)"), ("roda do mouse", "aproximar / afastar"),
         ("1  2  3  4", "vistas predefinidas"),
         ("P", "perspectiva / ortográfica"), ("setas, PgUp, PgDn", "mover a árvore"),
         ("Z  X", "girar em torno de z"), (",  .", "diminuir / aumentar"),
-        ("R", "voltar ao início"),
+        ("R", "voltar ao início"), ("Tab", "giro automático"),
     ]),
     ("Ver a árvore funcionando", [
         ("Espaço", "crescimento, geração por geração"), ("W", "fluxo de sangue"),
@@ -950,6 +1008,8 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_TAB:
+        estado.giro_auto = not estado.giro_auto
     elif tecla == pygame.K_q:
         trocar_tema()
         estado.atualizar_cores()            # o cinza dos vasos apagados depende do tema
@@ -1054,10 +1114,14 @@ def main():
     estado.reconstruir()
 
     relogio = pygame.time.Clock()
+    dt = 0.0
     rodando = True
     while rodando:
         salvar = False
+        estado.tempo = pygame.time.get_ticks() / 1000.0
         for evento in pygame.event.get():
+            if evento.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN, pygame.MOUSEWHEEL):
+                estado.interagiu()
             if evento.type == pygame.QUIT:
                 rodando = False
             elif evento.type == pygame.KEYDOWN:
@@ -1075,18 +1139,18 @@ def main():
             elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
                 estado.selecionar(*evento.pos)
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
-                estado.ang_y += evento.rel[0] * 0.5
-                estado.ang_x += evento.rel[1] * 0.5
+                estado.arrastar(*evento.rel)
+                estado.interagiu()
             elif evento.type == pygame.MOUSEWHEEL:
                 fator = 0.9 if evento.y > 0 else 1 / 0.9
                 estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
-        estado.tempo = pygame.time.get_ticks() / 1000.0
+        estado.passo_movimento(dt, pygame.mouse.get_pressed()[0])
         desenhar_quadro(estado, fonte)
         if salvar:
             capturar(nome_captura(estado))
         pygame.display.flip()
-        relogio.tick(60)
+        dt = relogio.tick(60) / 1000.0          # segundos desde o quadro anterior
 
     pygame.quit()
 
