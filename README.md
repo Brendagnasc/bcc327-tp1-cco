@@ -122,6 +122,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `W` | Fluxo de sangue animado |
 | `Espaço` | Anima o crescimento da árvore, geração por geração |
 | `H` | Tela de ajuda com todos os atalhos (`ESC` fecha) |
+| `Q` | Tema escuro (padrão) / claro |
 
 ### Mini Ray Tracer
 
