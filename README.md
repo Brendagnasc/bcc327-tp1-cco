@@ -125,6 +125,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `Q` | Tema escuro (padrão) / claro |
 | `Tab` | Liga/desliga o giro automático (começa após 6 s sem interação) |
 | `5` | Liga/desliga a neblina pela profundidade |
+| `6` | Liga/desliga a sombra da árvore no plano (shadow mapping) |
 
 ### Mini Ray Tracer
 
