@@ -2,7 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 9: comparação lado a lado com divisória arrastável (7),
+Versão portfólio 10: painel de controles com botões e sliders (botão Menu
+ou tecla 8), comparação lado a lado com divisória arrastável (7),
 sombra da árvore no plano (shadow mapping), neblina,
 fundo em gradiente e cor por geração; inércia e giro automático, tema escuro (Q),
 ajuda (H), crescimento, fluxo de
@@ -51,6 +52,7 @@ Teclas e mouse:
     Q                      tema escuro / claro
     5                      liga / desliga a neblina pela profundidade
     6                      liga / desliga a sombra da árvore no plano
+    8 ou botão Menu        abre / fecha o painel de controles (tudo pelo mouse)
     7                      comparação lado a lado: Flat x Phong, Gouraud x Phong,
                            NEAREST x bilinear, neblina, sombra, opacidade;
                            arraste a linha vertical para mover a divisória
@@ -78,6 +80,7 @@ import pygame
 from OpenGL.GL import *
 
 import metricas
+import painel
 import raycasting
 import shaders
 import transformacoes as T
@@ -194,6 +197,7 @@ class Estado:
         self.neblina = True
         self.sombra = True
         self.comparacao = None          # índice em COMPARACOES, ou None
+        self.pedir_captura = False      # o botão "Salvar" do painel pede uma captura
         self.divisoria = 0.5            # posição da divisória (fração da largura)
         self.movendo_divisoria = False
         self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
@@ -854,7 +858,11 @@ def desenhar_texto(fonte, texto, x, y, fundo=None, cor=None):
 def desenhar_barra_cores(estado, fonte):
     """Barra horizontal no topo da tela, desenhada em coordenadas de pixel."""
     arv = estado.arvore
-    x0, x1, y0, y1 = LARGURA * 0.3, LARGURA * 0.7, ALTURA - 60, ALTURA - 40
+    # com o painel aberto, a barra fica centralizada na área livre à direita dele
+    esq = painel.LARGURA_PAINEL if painel_ui is not None and painel_ui.aberto else 0
+    x0 = esq + (LARGURA - esq) * 0.3
+    x1 = esq + (LARGURA - esq) * 0.7
+    y0, y1 = ALTURA - 60, ALTURA - 40
     passos = 64
     _, vmin, vmax, nome_mapa, rotulo, formato = estado.escala_cor()
     valores = np.linspace(vmin, vmax, passos + 1)
@@ -893,7 +901,7 @@ def desenhar_barra_cores(estado, fonte):
     texto_min, texto_max = formato.format(vmin), formato.format(vmax)
     desenhar_texto(fonte, texto_min, x0 - 8 - fonte.size(texto_min)[0], y0 + 2)
     desenhar_texto(fonte, texto_max, x1 + 8, y0 + 2)
-    desenhar_texto(fonte, rotulo, LARGURA / 2 - fonte.size(rotulo)[0] / 2, y1 + 6)
+    desenhar_texto(fonte, rotulo, (x0 + x1) / 2 - fonte.size(rotulo)[0] / 2, y1 + 6)
 
 
 def criar_fbo_msaa(amostras=4):
@@ -1070,6 +1078,87 @@ def desenhar_divisoria(estado, fonte):
     desenhar_texto(fonte, f" {dir_} ", x + 10, y, tema["caixa"])
 
 
+painel_ui = None            # criado em main() (precisa das fontes do pygame)
+
+
+def montar_painel(estado):
+    """Monta o painel de controles. Cada controle muda um campo do Estado;
+    os que já têm tecla chamam tratar_tecla, para o efeito ser o mesmo."""
+    p = painel_ui
+    if not p.inicio(escuro=tema is TEMAS["escuro"]):
+        p.fim()
+        return
+    tecla = lambda k: (lambda: tratar_tecla(estado, k))
+
+    def mudar(campo, refazer=False):
+        def acao(valor):
+            setattr(estado, campo, valor)
+            if refazer:
+                estado.reconstruir()
+        return acao
+
+    tubos = estado.tau is not None
+    p.secao("Animação")
+    p.botoes([("Crescer", estado.nivel_crescimento() is not None, tecla(pygame.K_SPACE)),
+              ("Fluxo", estado.fluxo, tecla(pygame.K_w)),
+              ("Giro auto", estado.giro_auto, tecla(pygame.K_TAB))])
+
+    p.secao("Representação")
+    p.segmentos("Vasos", ["linhas", "tubos", "sólido"], estado.modo, mudar("modo", True))
+    p.segmentos("Cor", ["jet", "viridis", "geração"], estado.mapa, mudar("mapa", True))
+    p.slider("Espessura", estado.exagero, 0.5, 6.0, "{:.1f}x",
+             lambda v: setattr(estado, "exagero", round(v * 2) / 2),
+             estado.reconstruir)               # refaz a geometria só ao soltar
+
+    p.secao("Iluminação")
+    nomes = list(shaders.FONTES)
+    p.segmentos("Modelo", nomes, nomes.index(estado.sombreamento),
+                lambda i: setattr(estado, "sombreamento", nomes[i]))
+    p.segmentos("Luz", ["amb.", "+ dif.", "+ esp."], estado.componentes, mudar("componentes"))
+    p.slider("Intens.", estado.intensidade, 0.0, 2.0, "{:.1f}", mudar("intensidade"))
+
+    p.secao("Cena")
+    p.botoes([("Neblina", estado.neblina, tecla(pygame.K_5)),
+              ("Sombra", estado.sombra, tecla(pygame.K_6)),
+              ("Plano", estado.plano, tecla(pygame.K_t))])
+    p.segmentos("Opacidade", ["1,0", "0,6", "0,3"], estado.opacidade, mudar("opacidade"))
+    p.segmentos("Textura", ["near.", "bilin.", "própria", "(u,v)"], estado.filtro,
+                mudar("filtro"))
+    p.botoes([("Tema escuro", tema is TEMAS["escuro"], tecla(pygame.K_q)),
+              ("Métricas", estado.painel, tecla(pygame.K_j)),
+              ("Eixos", estado.eixos, tecla(pygame.K_a))])
+
+    p.secao("Filtro por raio (mm)")
+    r = estado.arvore.raios
+    p.slider("Mínimo", estado.filtro_min, float(r.min()), float(r.max()), "{:.2f}",
+             lambda v: setattr(estado, "filtro_min", min(v, estado.filtro_max)))
+    p.slider("Máximo", estado.filtro_max, float(r.min()), float(r.max()), "{:.2f}",
+             lambda v: setattr(estado, "filtro_max", max(v, estado.filtro_min)))
+
+    p.secao("Visibilidade")
+    p.segmentos("Culling", ["não", "OpenGL", "N·V"], estado.culling, mudar("culling"))
+    p.botoes([("Z-Buffer", estado.zbuffer, tecla(pygame.K_d)),
+              ("Ver prof.", estado.ver_profundidade, tecla(pygame.K_v)),
+              ("Faces trás", estado.destacar_tras, tecla(pygame.K_f))])
+
+    p.secao("Comparar e câmera")
+    opcoes = [None] + list(range(len(COMPARACOES)))
+    i = opcoes.index(estado.comparacao)
+    nome = "desligada" if estado.comparacao is None else         "{} x {}".format(*COMPARACOES[estado.comparacao][3:5])
+    p.ciclo("Comparar", nome,
+            lambda: setattr(estado, "comparacao", opcoes[(i - 1) % len(opcoes)]),
+            lambda: setattr(estado, "comparacao", opcoes[(i + 1) % len(opcoes)]))
+    p.segmentos("Vista", ["frente", "lado", "cima", "iso"], estado.vista, mudar("vista"))
+    p.botoes([("Perspectiva", estado.perspectiva, tecla(pygame.K_p)),
+              ("MSAA", estado.msaa, tecla(pygame.K_m))])
+    p.botoes([("Restaurar", False, tecla(pygame.K_r)),
+              ("Salvar", False, lambda: setattr(estado, "pedir_captura", True)),
+              ("Ray Tracer", False, tecla(pygame.K_y))])
+    if not tubos:
+        p.y += 4
+    p.fim()
+
+
 def desenhar_sobreposicoes(estado, fonte):
     """Textos e painéis 2D por cima da cena."""
     if not estado.hud:
@@ -1093,13 +1182,14 @@ def desenhar_sobreposicoes(estado, fonte):
     desenhar_texto(fonte, " H  ajuda ", LARGURA - dica.get_width() - 22, 10, (255, 210, 80),
                    (20, 20, 20))
     info = estado.info_selecao()
+    x_info = 10 + (painel.LARGURA_PAINEL if painel_ui is not None and painel_ui.aberto else 0)
     if info:                                  # painel do vaso selecionado, no topo
         l1, l2 = info.split("\n")
-        desenhar_texto(fonte, " selecionado: " + l1 + " ", 10, ALTURA - 92, tema["caixa"])
-        desenhar_texto(fonte, " " + l2 + " ", 10, ALTURA - 114, tema["caixa"])
+        desenhar_texto(fonte, " selecionado: " + l1 + " ", x_info, ALTURA - 92, tema["caixa"])
+        desenhar_texto(fonte, " " + l2 + " ", x_info, ALTURA - 114, tema["caixa"])
         legenda = [("vaso", COR_SELECAO), ("caminho até a raiz", COR_CAMINHO),
                    ("irrigado por ele", COR_SUBARVORE)]
-        x = 10
+        x = x_info
         for texto, cor in legenda:            # quadradinhos coloridos da legenda
             glColor3f(*cor)
             glWindowPos2d(x, ALTURA - 133)
@@ -1107,6 +1197,8 @@ def desenhar_sobreposicoes(estado, fonte):
                          np.full((12, 12, 3), [int(255 * c) for c in cor], dtype=np.uint8))
             desenhar_texto(fonte, texto, x + 16, ALTURA - 136)
             x += 22 + fonte.size(texto)[0] + 14
+    if painel_ui is not None:                 # por último: o painel fica por cima de tudo
+        montar_painel(estado)
 
 
 # -------------------------------------------------------------------- ajuda
@@ -1127,7 +1219,7 @@ AJUDA = [
     ("Aparência", [
         ("E", "linhas / tubos / tubos sólidos"), ("C", "cor: raio / geração"),
         ("5", "neblina"), ("6", "sombra no plano"),
-        ("7", "comparação lado a lado"),
+        ("7", "comparação lado a lado"), ("8", "painel de controles"),
         ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
         ("K", "componentes da luz"), ("L + setas", "mover a luz"),
         ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
@@ -1251,6 +1343,9 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_8:
+        if painel_ui is not None:
+            painel_ui.alternar()
     elif tecla == pygame.K_7:
         # desligado -> 1ª comparação -> ... -> última -> desligado
         if estado.comparacao is None:
@@ -1363,6 +1458,8 @@ def main():
     fonte = pygame.font.Font(None, 24)
 
     inicializar_gl()
+    global painel_ui
+    painel_ui = painel.Painel(LARGURA, ALTURA, desenhar_texto)
 
     estado = Estado(arvore)
     estado.modo = 1 if arvore.eh_3d else 0          # TP2: modelos 3D abrem em tubos
@@ -1371,6 +1468,7 @@ def main():
 
     relogio = pygame.time.Clock()
     dt = 0.0
+    no_painel = False
     rodando = True
     while rodando:
         salvar = False
@@ -1395,13 +1493,20 @@ def main():
             elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
                 estado.selecionar(*evento.pos)
             elif (evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1
+                  and estado.hud and not estado.ajuda and painel_ui.clique(evento.pos)):
+                no_painel = True                      # clique tratado pelo painel
+            elif (evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1
                   and estado.comparacao is not None
                   and abs(evento.pos[0] - estado.divisoria * LARGURA) < 14):
                 estado.movendo_divisoria = True       # pegou a divisória
             elif evento.type == pygame.MOUSEBUTTONUP and evento.button == 1:
                 estado.movendo_divisoria = False
+                painel_ui.soltar()
+                no_painel = False
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
-                if estado.movendo_divisoria:
+                if painel_ui.mover(evento.pos) or no_painel:
+                    pass                              # arrastando um slider do painel
+                elif estado.movendo_divisoria:
                     estado.divisoria = float(np.clip(evento.pos[0] / LARGURA, 0.05, 0.95))
                 else:
                     estado.arrastar(*evento.rel)
@@ -1410,10 +1515,11 @@ def main():
                 fator = 0.9 if evento.y > 0 else 1 / 0.9
                 estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
-        estado.passo_movimento(dt, pygame.mouse.get_pressed()[0])
+        estado.passo_movimento(dt, pygame.mouse.get_pressed()[0] and not no_painel)
         desenhar_quadro(estado, fonte)
-        if salvar:
+        if salvar or estado.pedir_captura:
             capturar(nome_captura(estado))
+            estado.pedir_captura = False
         pygame.display.flip()
         dt = relogio.tick(60) / 1000.0          # segundos desde o quadro anterior
 
