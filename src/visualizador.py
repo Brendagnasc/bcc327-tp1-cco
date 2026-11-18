@@ -2,7 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 8: sombra da árvore no plano (shadow mapping), neblina,
+Versão portfólio 9: comparação lado a lado com divisória arrastável (7),
+sombra da árvore no plano (shadow mapping), neblina,
 fundo em gradiente e cor por geração; inércia e giro automático, tema escuro (Q),
 ajuda (H), crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
@@ -50,6 +51,9 @@ Teclas e mouse:
     Q                      tema escuro / claro
     5                      liga / desliga a neblina pela profundidade
     6                      liga / desliga a sombra da árvore no plano
+    7                      comparação lado a lado: Flat x Phong, Gouraud x Phong,
+                           NEAREST x bilinear, neblina, sombra, opacidade;
+                           arraste a linha vertical para mover a divisória
     Tab                    liga / desliga o giro automático (começa após alguns
                            segundos sem nenhuma interação)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
@@ -122,6 +126,16 @@ ESQUEMAS = {"jet": ("raio", "jet"), "viridis": ("raio", "viridis"), "geração":
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
 LUZ_PADRAO = (0.8, 2.6, 1.4)   # posição inicial da luz pontual (espaço do mundo):
                                # mais alta que no TP2, para a sombra cair sobre o plano
+# Comparações lado a lado (tecla 7): (campo do Estado, valor à esquerda,
+# valor à direita, rótulo à esquerda, rótulo à direita)
+COMPARACOES = [
+    ("sombreamento", "Flat", "Phong", "Flat", "Phong"),
+    ("sombreamento", "Gouraud", "Phong", "Gouraud", "Phong"),
+    ("filtro", 0, 1, "textura NEAREST", "textura bilinear"),
+    ("neblina", False, True, "sem neblina", "com neblina"),
+    ("sombra", False, True, "sem sombra", "com sombra"),
+    ("opacidade", 0, 2, "opaco", "transparente (0,3)"),
+]
 TAM_SOMBRA = 2048              # resolução do mapa de sombra (texels por lado)
 PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
 CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
@@ -179,6 +193,9 @@ class Estado:
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
         self.neblina = True
         self.sombra = True
+        self.comparacao = None          # índice em COMPARACOES, ou None
+        self.divisoria = 0.5            # posição da divisória (fração da largura)
+        self.movendo_divisoria = False
         self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
         self.arraste = np.zeros(2)      # rotação arrastada desde o último quadro
         self.giro_auto = True
@@ -452,6 +469,9 @@ class Estado:
                  f"{MODOS[self.modo]} | {aa}")
         if self.plano and self.arvore.eh_3d:
             texto += f" | textura: {FILTROS[self.filtro]}"
+        if self.comparacao is not None:
+            _, _, _, esq, dir_ = COMPARACOES[self.comparacao]
+            texto += f"\ncomparação: {esq} | {dir_}  (arraste a linha para mover)"
         if self.filtro_ativo() or self.modo_intervalo:
             texto += (f"\nfiltro de raio [{self.filtro_min:.3f}, {self.filtro_max:.3f}] mm: "
                       f"{int(self.visiveis().sum())}/{self.arvore.n_segmentos} vasos"
@@ -711,7 +731,14 @@ def usar_sombra(estado):
 
 def passada_sombra(estado):
     """1ª passada: desenha a árvore vista da luz e guarda só a profundidade."""
-    if not usar_sombra(estado):
+    comparando_sombra = (estado.comparacao is not None
+                         and COMPARACOES[estado.comparacao][0] == "sombra")
+    original = estado.sombra
+    if comparando_sombra:
+        estado.sombra = True
+    ativo = usar_sombra(estado)
+    estado.sombra = original
+    if not ativo:
         return
     glBindFramebuffer(GL_FRAMEBUFFER, mapa_sombra["fbo"])
     glViewport(0, 0, TAM_SOMBRA, TAM_SOMBRA)
@@ -953,6 +980,30 @@ def desenhar_quadro(estado, fonte):
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
         glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+    if estado.comparacao is None:
+        desenhar_cena(estado)
+    else:
+        desenhar_comparacao(estado)
+
+    if usar_msaa:                              # resolve: média das amostras -> janela
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
+        glBlitFramebuffer(0, 0, LARGURA, ALTURA, 0, 0, LARGURA, ALTURA,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    if estado.ver_profundidade:
+        mostrar_profundidade(estado)
+
+    glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
+    if estado.comparacao is not None:
+        desenhar_divisoria(estado, fonte)
+    desenhar_sobreposicoes(estado, fonte)
+
+
+def desenhar_cena(estado):
+    """Fundo, plano, árvore e marcadores: tudo o que é 3D."""
     desenhar_fundo()
 
     # Z-Buffer: cada fragmento só é escrito se estiver mais perto que o já gravado
@@ -973,17 +1024,54 @@ def desenhar_quadro(estado, fonte):
         desenhar_luz(estado)
     desenhar_impacto(estado)
 
-    if usar_msaa:                              # resolve: média das amostras -> janela
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)
-        glBlitFramebuffer(0, 0, LARGURA, ALTURA, 0, 0, LARGURA, ALTURA,
-                          GL_COLOR_BUFFER_BIT, GL_NEAREST)
-        glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
-    if estado.ver_profundidade:
-        mostrar_profundidade(estado)
+def desenhar_comparacao(estado):
+    """A mesma cena desenhada duas vezes, cada uma recortada a um lado da tela.
 
-    glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
+    glScissor limita a escrita de pixels a um retângulo: a 1ª passada só
+    alcança a parte à esquerda da divisória, a 2ª só a parte à direita.
+    O Z-Buffer é limpo entre as passadas (também só dentro do retângulo).
+    """
+    campo, valor_esq, valor_dir, _, _ = COMPARACOES[estado.comparacao]
+    original = getattr(estado, campo)
+    x = int(estado.divisoria * LARGURA)
+    glEnable(GL_SCISSOR_TEST)
+    for x0, largura, valor in ((0, x, valor_esq), (x, LARGURA - x, valor_dir)):
+        setattr(estado, campo, valor)
+        glScissor(x0, 0, max(largura, 0), ALTURA)
+        glClear(GL_DEPTH_BUFFER_BIT)
+        desenhar_cena(estado)
+    glDisable(GL_SCISSOR_TEST)                # o blit do MSAA também respeitaria o recorte
+    setattr(estado, campo, original)
+
+
+def desenhar_divisoria(estado, fonte):
+    """Linha vertical com um puxador e os rótulos de cada lado."""
+    x = estado.divisoria * LARGURA
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, LARGURA, 0, ALTURA, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glColor3f(1.0, 0.82, 0.3)
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    glVertex2f(x, 0); glVertex2f(x, ALTURA)
+    glEnd()
+    glLineWidth(2.0)
+    glBegin(GL_QUADS)                          # puxador no meio da linha
+    for dx, dy in ((-9, -26), (9, -26), (9, 26), (-9, 26)):
+        glVertex2f(x + dx, ALTURA / 2 + dy)
+    glEnd()
+
+    _, _, _, esq, dir_ = COMPARACOES[estado.comparacao]
+    y = ALTURA - 100
+    rotulo_esq = f" {esq} "
+    desenhar_texto(fonte, rotulo_esq, x - 10 - fonte.size(rotulo_esq)[0], y, tema["caixa"])
+    desenhar_texto(fonte, f" {dir_} ", x + 10, y, tema["caixa"])
+
+
+def desenhar_sobreposicoes(estado, fonte):
+    """Textos e painéis 2D por cima da cena."""
     if not estado.hud:
         return
     if estado.ajuda:                          # a ajuda substitui os outros textos
@@ -1039,6 +1127,7 @@ AJUDA = [
     ("Aparência", [
         ("E", "linhas / tubos / tubos sólidos"), ("C", "cor: raio / geração"),
         ("5", "neblina"), ("6", "sombra no plano"),
+        ("7", "comparação lado a lado"),
         ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
         ("K", "componentes da luz"), ("L + setas", "mover a luz"),
         ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
@@ -1162,6 +1251,14 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_7:
+        # desligado -> 1ª comparação -> ... -> última -> desligado
+        if estado.comparacao is None:
+            estado.comparacao = 0
+        elif estado.comparacao + 1 < len(COMPARACOES):
+            estado.comparacao += 1
+        else:
+            estado.comparacao = None
     elif tecla == pygame.K_6:
         estado.sombra = not estado.sombra
     elif tecla == pygame.K_5:
@@ -1297,8 +1394,17 @@ def main():
                     tratar_tecla(estado, evento.key)
             elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
                 estado.selecionar(*evento.pos)
+            elif (evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1
+                  and estado.comparacao is not None
+                  and abs(evento.pos[0] - estado.divisoria * LARGURA) < 14):
+                estado.movendo_divisoria = True       # pegou a divisória
+            elif evento.type == pygame.MOUSEBUTTONUP and evento.button == 1:
+                estado.movendo_divisoria = False
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
-                estado.arrastar(*evento.rel)
+                if estado.movendo_divisoria:
+                    estado.divisoria = float(np.clip(evento.pos[0] / LARGURA, 0.05, 0.95))
+                else:
+                    estado.arrastar(*evento.rel)
                 estado.interagiu()
             elif evento.type == pygame.MOUSEWHEEL:
                 fator = 0.9 if evento.y > 0 else 1 / 0.9
