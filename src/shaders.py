@@ -67,9 +67,11 @@ uniform mat3 u_normal;       // transposta da inversa de (V . M) 3x3
 # 'flat' desliga a interpolação: o triângulo inteiro usa a cor de um vértice.
 FLAT_VERT = CABECALHO_VERT + ILUMINACAO + """
 flat out vec3 v_cor;
+out vec3 v_pos;
 void main() {
     vec4 pos = u_modelview * vec4(a_posicao, 1.0);
     gl_Position = u_projecao * pos;
+    v_pos = pos.xyz;
     v_cor = iluminar(u_normal * a_normal, pos.xyz, a_cor);
 }
 """
@@ -78,7 +80,27 @@ void main() {
 #
 # Transparência: a cor sai com alfa = u_alfa e o OpenGL compõe com o que já
 # está no framebuffer (alpha blending):  C = alfa*C_novo + (1 - alfa)*C_antigo
-DESTAQUE = """
+#
+# Neblina: quanto mais longe da câmera, mais a cor se mistura com a do fundo
+# (no mesmo ponto da tela, já que o fundo é um gradiente vertical):
+#     f = f_max * smoothstep(perto, longe, distância)
+#     cor_final = (1 - f) * cor + f * cor_do_fundo
+NEBLINA = """
+uniform float u_neblina;         // 1 liga
+uniform float u_neb_perto;       // distância onde a neblina começa
+uniform float u_neb_longe;       // distância onde ela atinge o máximo
+uniform vec3  u_fundo_baixo;     // cores do gradiente do fundo
+uniform vec3  u_fundo_alto;
+uniform float u_altura_tela;
+vec3 aplicar_neblina(vec3 cor, vec3 pos) {
+    if (u_neblina < 0.5) return cor;
+    float f = 0.8 * smoothstep(u_neb_perto, u_neb_longe, -pos.z);
+    vec3 fundo = mix(u_fundo_baixo, u_fundo_alto, gl_FragCoord.y / u_altura_tela);
+    return mix(cor, fundo, f);
+}
+"""
+
+DESTAQUE = NEBLINA + """
 uniform float u_destacar_tras;
 uniform float u_alfa;            // opacidade: 1 = opaco, 0 = invisível
 vec4 destacar(vec4 cor) {
@@ -90,27 +112,31 @@ vec4 destacar(vec4 cor) {
 FLAT_FRAG = """
 #version 330 core
 flat in vec3 v_cor;
+in vec3 v_pos;
 out vec4 f_cor;
 """ + DESTAQUE + """
-void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
+void main() { f_cor = destacar(vec4(aplicar_neblina(v_cor, v_pos), 1.0)); }
 """
 
 # ---------------------------------------------------------------- Gouraud
 # Iluminação por VÉRTICE; o rasterizador interpola as CORES.
 GOURAUD_VERT = CABECALHO_VERT + ILUMINACAO + """
 out vec3 v_cor;
+out vec3 v_pos;
 void main() {
     vec4 pos = u_modelview * vec4(a_posicao, 1.0);
     gl_Position = u_projecao * pos;
+    v_pos = pos.xyz;
     v_cor = iluminar(u_normal * a_normal, pos.xyz, a_cor);
 }
 """
 GOURAUD_FRAG = """
 #version 330 core
 in vec3 v_cor;
+in vec3 v_pos;
 out vec4 f_cor;
 """ + DESTAQUE + """
-void main() { f_cor = destacar(vec4(v_cor, 1.0)); }
+void main() { f_cor = destacar(vec4(aplicar_neblina(v_cor, v_pos), 1.0)); }
 """
 
 # ---------------------------------------------------------------- Phong
@@ -175,7 +201,7 @@ out vec4 f_cor;
 """ + ILUMINACAO + DESTAQUE + FLUXO + CRESCIMENTO + """
 void main() {
     vec3 cor = aplicar_crescimento(aplicar_fluxo(v_cor, v_tau), v_ordem);
-    f_cor = destacar(vec4(iluminar(v_normal, v_pos, cor), 1.0));
+    f_cor = destacar(vec4(aplicar_neblina(iluminar(v_normal, v_pos, cor), v_pos), 1.0));
 }
 """
 
@@ -215,7 +241,7 @@ in vec2 v_uv;                  // interpolada para este pixel
 out vec4 f_cor;
 uniform sampler2D u_textura;
 uniform int u_modo;            // 0 NEAREST, 1 bilinear OpenGL, 2 bilinear própria, 3 (u, v)
-""" + ILUMINACAO + """
+""" + ILUMINACAO + NEBLINA + """
 // Filtragem bilinear feita por nós: lê os 4 texels vizinhos com texelFetch
 // (que NÃO filtra) e interpola. Centros dos texels em (i + 0,5) / n.
 vec3 bilinear_propria(vec2 uv) {
@@ -237,7 +263,7 @@ void main() {
         return;
     }
     vec3 cor = (u_modo == 2) ? bilinear_propria(v_uv) : texture(u_textura, v_uv).rgb;
-    f_cor = vec4(iluminar(v_normal, v_pos, cor), 1.0);
+    f_cor = vec4(aplicar_neblina(iluminar(v_normal, v_pos, cor), v_pos), 1.0);
 }
 """
 
