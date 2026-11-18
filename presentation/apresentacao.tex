@@ -1,7 +1,7 @@
 \documentclass[aspectratio=169,11pt]{beamer}
 
 % ---------------------------------------------------------
-% TP1 - Visualização Geométrica, Rasterização e Recorte de Árvores CCO
+% TP2 - Visualização 3D Avançada de Árvores CCO
 % BCC327 - Computação Gráfica - UFOP - 2026.2
 % ---------------------------------------------------------
 
@@ -18,7 +18,7 @@
 \usepackage{tikz}
 \usetikzlibrary{positioning}
 
-\graphicspath{{figures/}}
+\graphicspath{{../report/figures/}}
 \renewcommand{\figurename}{Figura}
 \renewcommand{\tablename}{Tabela}
 
@@ -74,11 +74,12 @@
     {\scriptsize #3}
   \end{minipage}}
 
+
 % ---------------------------------------------------------
 % DADOS DA APRESENTACAO
 % ---------------------------------------------------------
-\title[TP1 CCO | Brenda Gabrielle Alves Nascimento (24.1.4011)]{Visualização Geométrica, Rasterização e Recorte de Árvores Arteriais CCO}
-\subtitle{BCC327 -- Computação Gráfica | Trabalho Prático 1}
+\title[TP2 CCO | Brenda Gabrielle Alves Nascimento (24.1.4011)]{Visualização 3D Avançada de Árvores Arteriais CCO}
+\subtitle{Visibilidade, Iluminação e Técnicas Baseadas em Raios\\BCC327 -- Computação Gráfica | Trabalho Prático 2}
 \author{Brenda Gabrielle Alves Nascimento\\{\small Matrícula 24.1.4011}}
 \institute[UFOP]{Departamento de Computação (DECOM)\\Universidade Federal de Ouro Preto (UFOP)}
 \date{2026.2 | Prof. Dr. Rafael Alves Bonfim de Queiroz}
@@ -95,246 +96,288 @@
 \end{frame}
 
 % =========================================================
-\section{Contexto e Objetivos}
+\section{Contexto e Arquitetura}
 % =========================================================
 
-\begin{frame}{Contexto: árvores arteriais CCO}
+\begin{frame}{Do TP1 ao TP2}
 \begin{columns}[c]
-\column{0.42\textwidth}
-\includegraphics[width=\linewidth]{m1_tubos_3d}
+\column{0.40\textwidth}
+\includegraphics[width=\linewidth]{m1_tubos}
 
-\column{0.55\textwidth}
-\begin{block}{Arquivo VTK (POLYDATA)}
+\column{0.57\textwidth}
+\begin{block}{Problema}
 \small
-\texttt{POINTS} \quad coordenadas $(x, y, z)$\\
-\texttt{LINES} \quad\ \ segmentos \texttt{2 i j}\\
-\texttt{CELL\_DATA} \texttt{raio} por segmento (mm)
+Uma árvore 3D com 511 vasos tem ramos sobrepostos em vários níveis de profundidade. Para ser interpretável, a imagem precisa de:
 \end{block}
-\vspace{0.2cm}
 \small
-\begin{tabular}{lccc}
-\toprule
-& \textbf{Modelos} & \textbf{Pontos} & \textbf{Segmentos}\\
-\midrule
-2D & 6 & 16 a 512 & 15 a 511\\
-3D & 6 & 32 a 1024 & 31 a 1023\\
-\bottomrule
-\end{tabular}
-
-\vspace{0.15cm}
-\checkitem\ sempre $\text{segmentos} = \text{pontos} - 1$: uma árvore
+\begin{itemize}
+  \item[\checkitem] \textbf{oclusão correta} entre os vasos
+  \item[\checkitem] \textbf{iluminação} que revele a forma cilíndrica
+  \item[\checkitem] \textbf{transparência} para ver o interior
+  \item[\checkitem] \textbf{interação}: consultar e isolar vasos
+\end{itemize}
+\vspace{0.1cm}
+No TP1, iluminação e visibilidade eram \alert{caixa-preta} do OpenGL.
 \end{columns}
 \end{frame}
 
-\begin{frame}{Arquitetura: dois programas, mesmos módulos}
+\begin{frame}{Arquitetura}
 \begin{center}
 \begin{tikzpicture}[
   caixa/.style={draw=deepnavy, fill=lightgray, rounded corners, align=center,
-                minimum width=2.6cm, minimum height=0.8cm, font=\small},
+                minimum width=1.9cm, minimum height=0.8cm, font=\footnotesize},
   prog/.style={draw=ufopred, fill=ufopred, text=white, rounded corners, align=center,
                minimum width=3.6cm, minimum height=0.9cm, font=\small\bfseries},
   seta/.style={->, thick, ufopred}]
-\node[caixa] (vtk) {Leitor VTK};
-\node[caixa, right=0.5cm of vtk] (cor) {Cores\\geometria};
-\node[caixa, right=0.5cm of cor] (mat) {Matrizes\\câmera};
-\node[caixa, right=0.5cm of mat] (ras) {Rasterização\\SSAA};
-\node[caixa, right=0.5cm of ras] (rec) {Recorte};
-\node[prog, below=1.3cm of cor, xshift=0.6cm] (vis) {Visualizador\\(OpenGL)};
-\node[prog, below=1.3cm of ras, xshift=-0.6cm] (did) {Modo didático\\(framebuffer próprio)};
-\draw[seta] (vtk) -- (vis); \draw[seta] (cor) -- (vis); \draw[seta] (mat) -- (vis);
-\draw[seta] (vtk) -- (did); \draw[seta] (ras) -- (did); \draw[seta] (rec) -- (did);
+\node[caixa] (geo) {Tubos\\normais};
+\node[caixa, right=0.25cm of geo] (sha) {Shaders\\GLSL};
+\node[caixa, right=0.25cm of sha] (tex) {Textura};
+\node[caixa, right=0.25cm of tex] (ray) {Ray\\Casting};
+\node[caixa, right=0.25cm of ray] (met) {Métricas};
+\node[caixa, right=0.25cm of met] (rt) {Interseções\\NumPy};
+\node[prog, below=1.3cm of tex, xshift=-0.4cm] (vis) {Visualizador\\(OpenGL 3.3)};
+\node[prog, below=1.3cm of rt, xshift=-1.0cm] (mrt) {Mini Ray Tracer\\(só NumPy)};
+\draw[seta] (geo) -- (vis); \draw[seta] (sha) -- (vis); \draw[seta] (tex) -- (vis);
+\draw[seta] (ray) -- (vis); \draw[seta] (met) -- (vis); \draw[seta] (rt) -- (mrt);
+\draw[seta, dashed] (vis) -- node[above, font=\scriptsize]{tecla \texttt{Y}} (mrt);
 \end{tikzpicture}
 \end{center}
-\vspace{0.3cm}
+\vspace{0.2cm}
 \begin{block}{Ideia central}
-No modo didático, \alert{nenhum pixel vem da biblioteca}: o pygame-ce só amplia a matriz NumPy escrita pelos nossos algoritmos.
+O OpenGL rasteriza e interpola; \alert{as equações são nossas}: matrizes, iluminação, culling, ordenação, filtragem e interseções.
 \end{block}
 \end{frame}
 
 % =========================================================
-\section{Visualizador}
+\section{Visibilidade}
 % =========================================================
 
-\begin{frame}{Primitivas e atributos visuais}
+\begin{frame}{Back-Face Culling e Z-Buffer}
 \centering
-\fig{0.24}{m1_linhas_jet}{linhas}\hfill
-\fig{0.24}{m1_faixas_jet}{faixas + jet}\hfill
-\fig{0.24}{m1_faixas_viridis}{faixas + viridis}\hfill
-\fig{0.24}{m1_solido}{espessura sólida}
-
-\vspace{0.3cm}
-\small
-\begin{columns}[t]
-\column{0.48\textwidth}
-\checkitem\ cor: $t = \dfrac{r - r_{\min}}{r_{\max} - r_{\min}}$, interpolação RGB\\
-\checkitem\ jet: contraste | viridis: uniforme
-\column{0.48\textwidth}
-\checkitem\ faixa = 2 triângulos + discos nas pontas\\
-\checkitem\ 3D: cilindros + esferas nas junções
-\end{columns}
-\end{frame}
-
-\begin{frame}{Transformações geométricas}
-\centering
-\fig{0.24}{m2_original}{original}\hfill
-\fig{0.24}{m2_translacao}{translação}\hfill
-\fig{0.24}{m2_rotacao}{rotação $35^\circ$}\hfill
-\fig{0.24}{m2_escala}{escala $0{,}6$}
-
-\vspace{0.4cm}
-\begin{block}{Matrizes próprias em coordenadas homogêneas}
-\centering
-$\mathbf{p}' = P \cdot V \cdot M \cdot \mathbf{p}$ \qquad $M = T \cdot R_x R_y R_z \cdot S \cdot N$\\[0.1cm]
-{\small validadas contra \texttt{glOrtho}, \texttt{gluPerspective} e \texttt{gluLookAt}}
-\end{block}
-\end{frame}
-
-\begin{frame}{Observador: quatro vistas}
-\centering
-\fig{0.24}{m2_vista_frontal}{frontal}\hfill
-\fig{0.24}{m2_vista_lateral}{lateral}\hfill
-\fig{0.24}{m2_vista_superior}{superior}\hfill
-\fig{0.24}{m2_vista_isometrica}{isométrica}
-
-\vspace{0.3cm}
-\small
-\begin{columns}[t]
-\column{0.48\textwidth}
-\textbf{Espaço do mundo}: referencial fixo da cena\\
-\textbf{Espaço da câmera}: câmera na origem, olhando para $-z$
-\column{0.48\textwidth}
-$\mathbf{w} = \dfrac{\mathbf{e} - \mathbf{a}}{\|\mathbf{e} - \mathbf{a}\|}$, \quad
-$\mathbf{u} = \mathbf{c} \times \mathbf{w}$, \quad
-$\mathbf{v} = \mathbf{w} \times \mathbf{u}$
-\end{columns}
-\end{frame}
-
-\begin{frame}{Projeção perspectiva $\times$ ortográfica}
-\centering
-\fig{0.36}{m2_perspectiva}{perspectiva: o tronco próximo fica maior}\hspace{0.6cm}
-\fig{0.36}{m2_ortografica}{ortográfica: espessura não depende da distância}
+\fig{0.19}{m2_zbuffer_sem_culling}{Z-Buffer}\hfill
+\fig{0.19}{m2_sem_zbuffer_sem_culling}{sem Z, sem culling}\hfill
+\fig{0.19}{m2_sem_zbuffer_com_culling}{sem Z, culling GL}\hfill
+\fig{0.19}{m2_zbuffer_culling_proprio}{Z + culling próprio}\hfill
+\fig{0.19}{m2_profundidade}{profundidade}
 
 \vspace{0.2cm}
 \small
-\checkitem\ diferença está na última linha: $(0, 0, -1, 0)$ copia a profundidade para $w$\quad
-\checkitem\ caixa ortográfica com $h = d \tan(\text{fovy}/2)$
-\end{frame}
-
-% =========================================================
-\section{Modo Didático}
-% =========================================================
-
-\begin{frame}{Rasterização de segmentos: Bresenham}
-\begin{columns}[c]
-\column{0.42\textwidth}
-\includegraphics[width=\linewidth]{m3_arvore_bresenham}
-
-\column{0.56\textwidth}
-\small
-$p_0 = 2\Delta y - \Delta x$\\[0.1cm]
-$p < 0$: mantém $y$, \ $p \mathrel{+}= 2\Delta y$\\
-$p \ge 0$: $y{+}{+}$, \ $p \mathrel{+}= 2\Delta y - 2\Delta x$
-
-\vspace{0.3cm}
+\begin{columns}[t]
+\column{0.50\textwidth}
+\begin{block}{Culling próprio}
 \scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{c|ccccccccccc}
-\toprule
-$k$ & 0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10\\
-$p_k$ & 6 & 2 & \alert{$-2$} & 14 & 10 & 6 & 2 & \alert{$-2$} & 14 & 10 & 6\\
-$y$ & 10 & 11 & 12 & 12 & 13 & 14 & 15 & 16 & 16 & 17 & 18\\
-\bottomrule
-\end{tabular}
-
-\vspace{0.2cm}
-\small
-\checkitem\ $(20,10)$ a $(30,18)$: só inteiros\\
-\checkitem\ 20\,000 segmentos testados: erro $\le 0{,}5$ pixel
+descarta se $\mathbf{N}\cdot\mathbf{V} \le 0$, com $\mathbf{V} = -\text{centroide}$ (perspectiva)\\
+\alert{4\,546 de 9\,192 triângulos} (49,5\%), imagem idêntica
+\end{block}
+\column{0.47\textwidth}
+\begin{block}{Conclusão}
+\scriptsize
+faces de trás em \textcolor{red}{vermelho}: culling sozinho \alert{não} resolve a oclusão \emph{entre} vasos; só o Z-Buffer
+\end{block}
 \end{columns}
 \end{frame}
 
-\begin{frame}{Preenchimento: Scanline Fill}
-\centering
-\fig{0.36}{m4_scanline_animacao}{varredura em andamento}\hspace{0.6cm}
-\fig{0.36}{m4_scanline}{região de interesse preenchida}
-
-\vspace{0.2cm}
-\small
+\begin{frame}{Culling: próprio $\times$ OpenGL e o Z-Buffer}
 \begin{columns}[t]
-\column{0.32\textwidth}\centering \checkitem\ tabela de arestas:\\ $(y_{\max},\ x,\ 1/m)$
-\column{0.32\textwidth}\centering \checkitem\ arestas ativas ordenadas,\\ preenche aos pares
-\column{0.32\textwidth}\centering \checkitem\ coerência entre linhas:\\ $x \mathrel{+}= 1/m$
+\column{0.48\textwidth}
+\begin{block}{Dois critérios, mesmo resultado}
+\small
+\checkitem\ \textbf{próprio}: geometria antes da projeção ($\mathbf{N}\cdot\mathbf{V}$)\\
+\checkitem\ \textbf{OpenGL}: ordem dos vértices na tela (anti-horário = frente)\\
+\checkitem\ exige faces orientadas: $(\mathbf{v}_1 - \mathbf{v}_0)\times(\mathbf{v}_2 - \mathbf{v}_0)$ para fora, garantido em \texttt{geometria.py}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{Profundidade não linear}
+\small
+\[ z = \frac{2nf}{(f+n) - (2d-1)(f-n)} \]
+lido com \texttt{glReadPixels}, linearizado e normalizado\\
+($n = 0{,}01$, $f = 100$): a precisão se concentra perto do plano near
+\end{block}
 \end{columns}
 \end{frame}
 
-\begin{frame}{Aliasing e antialiasing}
+% =========================================================
+\section{Iluminação e Sombreamento}
+% =========================================================
+
+\begin{frame}{Blinn--Phong em shaders próprios}
 \centering
-\fig{0.38}{m5_ssaa_leque}{sem AA $\times$ SSAA $4\times$ (16 amostras)}\hfill
-\fig{0.2}{m5_msaa_off_zoom}{sem MSAA}\hfill
-\fig{0.2}{m5_msaa_on_zoom}{MSAA $4\times$}
+\fig{0.24}{m3_ambiente}{só ambiente}\hspace{0.01\textwidth}
+\fig{0.24}{m3_difusa}{+ difusa}\hspace{0.01\textwidth}
+\fig{0.24}{m3_especular}{+ especular}
+
+\vspace{0.25cm}
+\begin{block}{Modelo de iluminação (espaço da câmera)}
+\centering
+$I = k_a\,\mathbf{c} + I_L\left[k_d\,\mathbf{c}\,\max(\mathbf{N}\cdot\mathbf{L},0) + k_s\max(\mathbf{N}\cdot\mathbf{H},0)^{\alpha}\right]$, \quad $\mathbf{H} = \dfrac{\mathbf{L}+\mathbf{V}}{\|\mathbf{L}+\mathbf{V}\|}$\\[0.1cm]
+{\small $k_a = 0{,}25$, $k_d = 0{,}75$, $k_s = 0{,}6$, $\alpha = 40$ | normais por $(M_{3\times3}^{-1})^T$}
+\end{block}
+\end{frame}
+
+\begin{frame}{Flat $\times$ Gouraud $\times$ Phong}
+\centering
+\fig{0.30}{m3_flat}{Flat: 1 vez por triângulo}\hfill
+\fig{0.30}{m3_gouraud}{Gouraud: por vértice, interpola cor}\hfill
+\fig{0.30}{m3_phong}{Phong: por pixel, interpola normal}
 
 \vspace{0.25cm}
 \small
+\checkitem\ mesma equação, muda \alert{onde} ela é avaliada (qualificador \texttt{flat}, vertex ou fragment shader)\\
+\checkitem\ Flat: tubos viram prismas de 12 lados\\
+\checkitem\ Gouraud $\approx$ Phong nos vasos finos; nos grossos o Gouraud borra o brilho ao longo dos triângulos longos
+\end{frame}
+
+\begin{frame}{Luz pontual móvel}
+\centering
+\fig{0.34}{m3_luz_esquerda}{luz à esquerda}\hspace{0.04\textwidth}
+\fig{0.34}{m3_luz_direita}{luz à direita}
+
+\vspace{0.2cm}
+\small
+tecla \texttt{L}: setas e \texttt{PageUp}/\texttt{PageDown} movem a luz, \texttt{+}/\texttt{-} mudam a intensidade\\
+a posição no mundo é levada ao espaço da câmera por $V$ antes de ir ao shader
+\end{frame}
+
+% =========================================================
+\section{Transparência e Textura}
+% =========================================================
+
+\begin{frame}{Transparência com Painter's Algorithm}
+\centering
+\fig{0.19}{m4_opaco}{opaco}\hfill
+\fig{0.19}{m4_alfa06_painter}{$\alpha = 0{,}6$}\hfill
+\fig{0.19}{m4_alfa03_painter}{$\alpha = 0{,}3$, Painter}\hfill
+\fig{0.19}{m4_alfa03_sem_ordem}{$\alpha = 0{,}3$, sem ordem}\hfill
+\fig{0.19}{m4_alfa03_painter_culling}{+ culling}
+
+\vspace{0.2cm}
+\small
 \begin{columns}[t]
-\column{0.48\textwidth}
-\textbf{SSAA (nosso)}: grade $k\times$ maior + média dos blocos $k \times k$
-\column{0.48\textwidth}
-\textbf{MSAA (OpenGL)}: amostras de cobertura, cor calculada uma vez; FBO + \texttt{glBlitFramebuffer}
+\column{0.50\textwidth}
+\checkitem\ $C = \alpha\,C_{\text{novo}} + (1-\alpha)\,C_{\text{antigo}}$: \alert{depende da ordem}\\
+\checkitem\ triângulos ordenados pelo $z$ do centroide, de trás para frente
+\column{0.47\textwidth}
+\checkitem\ Z-Buffer testa, mas não grava (\texttt{glDepthMask})\\
+\checkitem\ com culling: 1 camada por tubo e 18\,408 $\to$ 9\,105 triângulos
 \end{columns}
 \end{frame}
 
-\begin{frame}{Recorte de segmentos}
+\begin{frame}{Textura e filtragem bilinear própria}
 \centering
-\fig{0.3}{m6_recorte_antes}{antes}\hspace{0.4cm}
-\fig{0.3}{m6_recorte_depois}{depois}
+\fig{0.19}{m5_plano}{plano texturizado}\hfill
+\fig{0.19}{m5_coordenadas_uv}{$(u, v)$}\hfill
+\fig{0.19}{m5_nearest}{NEAREST}\hfill
+\fig{0.19}{m5_bilinear_opengl}{bilinear OpenGL}\hfill
+\fig{0.19}{m5_bilinear_propria}{bilinear própria}
 
 \vspace{0.15cm}
+\begin{columns}[c]
+\column{0.50\textwidth}
 \scriptsize
-\begin{tabular}{lll}
+textura $32\times32$ gerada em NumPy\\
+bilinear própria: 4 \texttt{texelFetch} (sem filtro) + interpolação\\[0.1cm]
+$\mathbf{c} = (1-f_y)[(1-f_x)\mathbf{c}_{00} + f_x\mathbf{c}_{10}] + f_y[(1-f_x)\mathbf{c}_{01} + f_x\mathbf{c}_{11}]$
+\column{0.47\textwidth}
+\begin{block}{Exemplo: $(u, v) = (0{,}245;\ 0{,}50)$}
+\scriptsize
+$f_x = 0{,}34$, $f_y = 0{,}50$\\
+NEAREST: $(235, 235, 240)$\\
+bilinear: $(212{,}5;\ 216{,}5;\ 227{,}0)$ = média exata
+\end{block}
+\end{columns}
+\end{frame}
+
+% =========================================================
+\section{Técnicas Baseadas em Raios}
+% =========================================================
+
+\begin{frame}{Seleção de vasos por Ray Casting}
+\begin{columns}[c]
+\column{0.38\textwidth}
+\includegraphics[width=\linewidth]{m6_selecao}\\
+{\scriptsize vaso 9 | geração 2 | raio 0,893\,mm | $t = 0{,}0202$}
+
+\column{0.59\textwidth}
+\small
+\checkitem\ pixel $\to$ NDC $\to$ $(PV)^{-1}$: raio $\mathbf{O} + t\mathbf{D}$\\
+\checkitem\ levado ao espaço do modelo por $M^{-1}$\\
+\checkitem\ vaso = cilindro + 2 esferas; escolhe o \alert{menor $t > 0$}
+\begin{block}{Raio--cilindro}
+\scriptsize
+$k_2 t^2 + k_1 t + k_0 = 0$, com $\mathbf{m} = \mathbf{O} - \mathbf{A}$:\\
+$k_2 = \mathbf{D}\cdot\mathbf{D} - (\mathbf{D}\cdot\mathbf{a})^2$, \
+$k_1 = 2[\mathbf{m}\cdot\mathbf{D} - (\mathbf{m}\cdot\mathbf{a})(\mathbf{D}\cdot\mathbf{a})]$\\
+$k_0 = \mathbf{m}\cdot\mathbf{m} - (\mathbf{m}\cdot\mathbf{a})^2 - r^2$, \ válido se $0 \le s \le h$
+\end{block}
+\scriptsize vetorizado: $\approx$ 0,6\,ms para os 1\,023 vasos do Nterm512
+\end{columns}
+\end{frame}
+
+\begin{frame}{Mini Ray Tracer}
+\centering
+\fig{0.32}{m7_rt_modo1}{1. Ray Casting}\hfill
+\fig{0.32}{m7_rt_modo2}{2. + raios de sombra}\hfill
+\fig{0.32}{m7_rt_modo3}{3. + raios refletidos}
+
+\vspace{0.2cm}
+\scriptsize
+\begin{tabular}{lrrrrr}
 \toprule
-& \textbf{Cohen--Sutherland} & \textbf{Liang--Barsky}\\
+\textbf{Modo ($640\times480$)} & \textbf{Primários} & \textbf{Sombra} & \textbf{Refletidos} & \textbf{Total} & \textbf{Tempo} \\
 \midrule
-Ideia & códigos de região de 4 bits & paramétrico, $t_0$ e $t_1$\\
-Exemplo $(2,6)$--$(36,30)$ & 3 interseções (1 desperdiçada) & 4 razões $q/p$, 2 pontos\\
-100\,000 segmentos & \multicolumn{2}{c}{resultados idênticos}\\
+1. Ray Casting & 307\,200 & 0 & 0 & 307\,200 & 0,76\,s \\
+2. + sombras & 307\,200 & 216\,228 & 0 & 523\,428 & 0,75\,s \\
+3. Ray Tracing & 307\,200 & 260\,377 & 225\,348 & 792\,925 & 1,36\,s \\
 \bottomrule
 \end{tabular}
 
 \vspace{0.1cm}
-\checkitem\ Cyrus--Beck: generaliza o Liang--Barsky para qualquer janela convexa
+$\mathbf{R} = \mathbf{D} - 2(\mathbf{D}\cdot\mathbf{N})\mathbf{N}$, profundidade 3 | raios secundários partem de $P + \varepsilon\mathbf{N}$ (evita \emph{shadow acne})
 \end{frame}
 
-\begin{frame}{Recorte de polígonos: Sutherland--Hodgman $\times$ Weiler--Atherton}
-\centering
-\fig{0.24}{m7_sh_u_depois}{S--H: 1 polígono + ponte}\hfill
-\fig{0.24}{m7_wa_u_depois}{W--A: 2 polígonos}\hfill
-\fig{0.24}{m7_sh_l_concavo}{S--H, janela côncava}\hfill
-\fig{0.24}{m7_wa_l_concavo}{W--A, janela côncava}
+% =========================================================
+\section{Recurso Adicional}
+% =========================================================
 
-\vspace{0.3cm}
-\begin{block}{Weiler--Atherton (diferencial)}
-\small
-Percorre as duas fronteiras trocando nas interseções: aceita polígonos côncavos e devolve regiões separadas.
+\begin{frame}{Métricas da árvore e filtro por raio}
+\centering
+\fig{0.27}{m8_completo}{árvore completa}\hfill
+\fig{0.27}{m8_grossos}{25\% mais grossos}\hfill
+\fig{0.27}{m8_finos}{40\% mais finos}
+
+\vspace{0.15cm}
+\begin{columns}[t]
+\column{0.48\textwidth}
+\scriptsize
+\checkitem\ grafo + BFS a partir da raiz: geração de cada vaso\\
+\checkitem\ comprimento, volume $\pi r^2 \ell$, bifurcações\\
+\checkitem\ $r_p^3/(r_{f_1}^3 + r_{f_2}^3) = 1{,}000$ em todos os modelos: \alert{lei de Murray}
+\column{0.48\textwidth}
+\begin{block}{Nterm256}
+\scriptsize
+25\% mais grossos: 18,5\% do comprimento, \alert{57,3\% do volume}\\
+40\% mais finos: 44,8\% do comprimento, 17,2\% do volume
 \end{block}
+\end{columns}
 \end{frame}
 
 % =========================================================
 \section{Discussão e Conclusão}
 % =========================================================
 
-\begin{frame}{O que foi implementado pelo grupo}
+\begin{frame}{O que é nosso e o que é da biblioteca}
 \small
 \begin{tabularx}{\textwidth}{X X}
 \toprule
-\textbf{Grupo} & \textbf{Biblioteca}\\
+\textbf{Implementação própria} & \textbf{Biblioteca}\\
 \midrule
-Leitor VTK, mapas de cores & Janela, teclado, mouse, texto (pygame-ce)\\
-Faixas 2D e tubos 3D com normais & Rasterização final dos triângulos (OpenGL)\\
-Matrizes de transformação, câmera e projeção & Teste de profundidade, iluminação dos tubos\\
-Bresenham, DDA, Scanline Fill & MSAA via FBO, VBOs\\
-Supersampling (SSAA) & Operações vetoriais (NumPy)\\
-Cohen--Sutherland, Liang--Barsky &\\
-Sutherland--Hodgman, Weiler--Atherton &\\
+Tubos, normais de vértice e de face, orientação & Janela, teclado, mouse, texto (pygame-ce)\\
+Matrizes de modelo, câmera, projeção e normais & Compilação dos shaders, rasterização\\
+Blinn--Phong, Flat, Gouraud, Phong (GLSL) & Interpolação dos atributos\\
+Culling $\mathbf{N}\cdot\mathbf{V}$, linearização do Z-Buffer & Teste de profundidade, culling ``OpenGL''\\
+Painter's Algorithm & Composição alfa (\texttt{glBlendFunc})\\
+Textura, $(u, v)$, bilinear própria & Amostragem NEAREST e bilinear (OpenGL)\\
+Ray Casting, mini Ray Tracer, métricas & MSAA, VBOs, operações vetoriais (NumPy)\\
 \bottomrule
 \end{tabularx}
 \end{frame}
@@ -342,69 +385,74 @@ Sutherland--Hodgman, Weiler--Atherton &\\
 \begin{frame}{Discussão}
 \begin{columns}[t]
 \column{0.48\textwidth}
-\begin{block}{Decisões}
+\begin{block}{Comparações}
 \small
-\checkitem\ espessura como geometria, não \texttt{glLineWidth}\\
-\checkitem\ recorte em coordenadas reais, depois rasterização\\
-\checkitem\ MSAA por FBO (WSL sem janela multiamostrada)
+\checkitem\ culling = otimização; Z-Buffer = visibilidade\\
+\checkitem\ Phong: brilho correto, custo absorvido pela GPU\\
+\checkitem\ rasterização: interativa, sem sombras nem reflexões\\
+\checkitem\ Ray Tracing: sombras e reflexões naturais, mas custo pixels $\times$ objetos $\times$ raios
 \end{block}
 \column{0.48\textwidth}
 \begin{block}{Limitações}
 \small
-\checkitem\ Nterm512 em tubos lento com renderização por software\\
-\checkitem\ iluminação da API (tema do TP2)\\
-\checkitem\ W--A trata degenerados por deslocamento numérico
+\checkitem\ Painter por centroide falha em interpenetrações (junções)\\
+\checkitem\ ordenação refeita a cada quadro em Python\\
+\checkitem\ Ray Tracer numa cena simplificada, sem antialiasing\\
+\checkitem\ Nterm512 lento no WSL (renderização por software)
 \end{block}
 \end{columns}
 \end{frame}
 
 \begin{frame}{Conclusões}
 \begin{itemize}
-  \item[\checkitem] 12 modelos lidos e representados por linhas, faixas e tubos
-  \item[\checkitem] transformações, vistas e projeções com matrizes próprias
-  \item[\checkitem] rasterização, preenchimento, antialiasing e recorte implementados e validados
-  \item[\checkitem] Weiler--Atherton como diferencial
+  \item[\checkitem] pipeline programável com iluminação e sombreamento próprios
+  \item[\checkitem] visibilidade estudada com culling próprio, culling do OpenGL e Z-Buffer
+  \item[\checkitem] transparência ordenada e textura com filtragem bilinear própria
+  \item[\checkitem] raios na interação (seleção) e na síntese de imagens (Ray Tracer)
+  \item[\checkitem] métricas e filtro: 1/4 dos vasos concentra mais da metade do volume
 \end{itemize}
-\vspace{0.3cm}
-\begin{block}{Mensagem final}
-Separar visualizador e modo didático permitiu mostrar cada algoritmo pixel a pixel, sem caixa-preta.
+\vspace{0.2cm}
+\begin{block}{Trabalhos futuros}
+Ray Tracer na árvore completa com BVH | transparência independente de ordem (OIT) | sombras por \emph{shadow mapping}
 \end{block}
 \end{frame}
 
 \begin{frame}{Demonstração}
 \begin{columns}[t]
 \column{0.48\textwidth}
-\textbf{Visualizador}
+\textbf{Visualizador} {\small (\texttt{tree3D\_Nterm128})}
 \small
 \begin{itemize}
-  \item[\checkitem] \texttt{E} representação, \texttt{C} cores
-  \item[\checkitem] mouse: rotação e zoom
-  \item[\checkitem] \texttt{1}--\texttt{4} vistas, \texttt{P} projeção
-  \item[\checkitem] \texttt{M} MSAA
+  \item[\checkitem] \texttt{F}, \texttt{D}, \texttt{B}, \texttt{V}: faces de trás, Z-Buffer, culling, profundidade
+  \item[\checkitem] \texttt{G}, \texttt{K}, \texttt{L}: sombreamento, componentes, luz
+  \item[\checkitem] \texttt{O}, \texttt{N}: opacidade, ordenação
+  \item[\checkitem] \texttt{T}, \texttt{U}: plano, filtragem
 \end{itemize}
 \column{0.48\textwidth}
-\textbf{Modo didático}
+\textbf{Raios e recurso adicional}
 \small
 \begin{itemize}
-  \item[\checkitem] \texttt{1}, \texttt{2} Bresenham
-  \item[\checkitem] \texttt{3} + \texttt{Espaço} Scanline
-  \item[\checkitem] \texttt{4} SSAA
-  \item[\checkitem] \texttt{5} recorte de segmentos
-  \item[\checkitem] \texttt{6} + \texttt{P}, \texttt{W}, \texttt{J} recorte de polígonos
+  \item[\checkitem] clique direito: seleção por Ray Casting
+  \item[\checkitem] \texttt{Y}: mini Ray Tracer, modos \texttt{1}, \texttt{2}, \texttt{3}
+  \item[\checkitem] \texttt{I} + setas: filtro por raio
+  \item[\checkitem] \texttt{J}: painel de métricas
 \end{itemize}
 \end{columns}
 \end{frame}
 
 \begin{frame}{Referências}
-\small
+\scriptsize
 \begin{thebibliography}{99}
-\bibitem{schreiner1993} SCHREINER, W.; BUXBAUM, P. F. Computer-optimization of vascular trees. \textit{IEEE Transactions on Biomedical Engineering}, 1993.
+\bibitem{schreiner1993} SCHREINER, W.; BUXBAUM, P. F. Computer-optimization of vascular trees. \textit{IEEE Trans. Biomedical Engineering}, 1993.
 \bibitem{foley} FOLEY, J. D. et al. \textit{Computer Graphics: Principles and Practice}. Addison-Wesley, 1990.
-\bibitem{hearn} HEARN, D.; BAKER, M. P. \textit{Computer Graphics, C Version}. Prentice Hall, 1997.
-\bibitem{bresenham} BRESENHAM, J. E. Algorithm for computer control of a digital plotter. \textit{IBM Systems Journal}, 1965.
-\bibitem{liang} LIANG, Y.-D.; BARSKY, B. A. A new concept and method for line clipping. \textit{ACM TOG}, 1984.
-\bibitem{sh} SUTHERLAND, I. E.; HODGMAN, G. W. Reentrant polygon clipping. \textit{CACM}, 1974.
-\bibitem{wa} WEILER, K.; ATHERTON, P. Hidden surface removal using polygon area sorting. \textit{SIGGRAPH}, 1977.
+\bibitem{catmull} CATMULL, E. \textit{A Subdivision Algorithm for Computer Display of Curved Surfaces}. Tese, University of Utah, 1974.
+\bibitem{gouraud} GOURAUD, H. Continuous shading of curved surfaces. \textit{IEEE Trans. Computers}, 1971.
+\bibitem{phong} PHONG, B. T. Illumination for computer generated pictures. \textit{CACM}, 1975.
+\bibitem{blinn} BLINN, J. F. Models of light reflection for computer synthesized pictures. \textit{SIGGRAPH}, 1977.
+\bibitem{newell} NEWELL, M. E.; NEWELL, R. G.; SANCHA, T. L. A solution to the hidden surface problem. \textit{ACM Annual Conference}, 1972.
+\bibitem{appel} APPEL, A. Some techniques for shading machine renderings of solids. \textit{AFIPS}, 1968.
+\bibitem{whitted} WHITTED, T. An improved illumination model for shaded display. \textit{CACM}, 1980.
+\bibitem{murray} MURRAY, C. D. The physiological principle of minimum work. \textit{PNAS}, 1926.
 \end{thebibliography}
 \end{frame}
 
@@ -415,8 +463,9 @@ Separar visualizador e modo didático permitiu mostrar cada algoritmo pixel a pi
 \begin{frame}[fragile]{Comandos de Execução}
 \begin{lstlisting}[language=bash]
 pip install -r requirements.txt
-python src/visualizador.py data/tree3D_Nterm256.vtk
-python src/modo_didatico.py data/tree2D_Nterm032.vtk
+python src/visualizador.py data/tree3D_Nterm128.vtk
+python src/raytracer.py            # ou tecla Y no visualizador
+python src/metricas.py data/tree3D_*.vtk
 python src/gerar_figuras.py        # regera as figuras
 \end{lstlisting}
 

@@ -2,14 +2,22 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão 5: MSAA ligável (antialiasing da API), tubos 3D com espessura
-proporcional ao raio e câmera com matrizes próprias (transformacoes.py).
+Versão portfólio 9: comparação lado a lado com divisória arrastável (7),
+sombra da árvore no plano (shadow mapping), neblina,
+fundo em gradiente e cor por geração; inércia e giro automático, tema escuro (Q),
+ajuda (H), crescimento, fluxo de
+sangue animado e clique que acende o caminho até a raiz e a subárvore
+irrigada. Mantém tudo do TP2.
 
 Uso:
     python src/visualizador.py [arquivo.vtk]
 
 Teclas e mouse:
-    arrastar (botão esq.)  rotação em torno de x e y
+    arrastar (botão esq.)  rotação em torno de x e y; soltando em movimento,
+                           a árvore continua girando e desacelera (inércia)
+    clique direito         seleciona o vaso sob o cursor (Ray Casting) e acende
+                           o caminho até a raiz e a subárvore que ele irriga;
+                           em área vazia, desfaz a seleção
     roda do mouse          zoom (aproxima / afasta a câmera)
     Z / X                  rotação em torno de z
     setas                  translação em x e y
@@ -21,13 +29,41 @@ Teclas e mouse:
     R                      restaura transformações e vista
     M                      liga / desliga o antialiasing MSAA
     S                      salva a tela em report/figures/
+    G                      sombreamento: Flat / Gouraud / Phong
+    K                      componentes: ambiente / + difusa / + especular
+    L                      modo luz: setas e PageUp/PageDown movem a luz,
+                           + e - mudam a intensidade (L de novo volta ao normal)
+    B                      Back-Face Culling: desligado / OpenGL / próprio (N . V)
+    D                      liga / desliga o Z-Buffer (teste de profundidade)
+    V                      mostra o conteúdo do Z-Buffer em tons de cinza
+    F                      pinta de vermelho as faces de trás
+    O                      opacidade dos vasos: 1,0 / 0,6 / 0,3
+    N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
+    T                      mostra / esconde o plano de referência com textura
+    U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
+    Y                      abre o mini Ray Tracer (raytracer.py) em outra janela
+    I                      modo intervalo: setas esquerda/direita mudam o raio mínimo
+                           e baixo/cima o raio máximo exibido (I de novo volta ao normal)
+    J                      mostra / esconde o painel de métricas da árvore
+    W                      liga / desliga o fluxo de sangue animado (usa o Phong)
+    Espaço                 anima o crescimento da árvore, geração por geração
+    H                      mostra / esconde a tela de ajuda com todos os atalhos
+    Q                      tema escuro / claro
+    5                      liga / desliga a neblina pela profundidade
+    6                      liga / desliga a sombra da árvore no plano
+    7                      comparação lado a lado: Flat x Phong, Gouraud x Phong,
+                           NEAREST x bilinear, neblina, sombra, opacidade;
+                           arraste a linha vertical para mover a divisória
+    Tab                    liga / desliga o giro automático (começa após alguns
+                           segundos sem nenhuma interação)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
-    C                      mapa de cores (jet / viridis)
+    C                      cor dos vasos: raio (jet) / raio (viridis) / geração
     + -                    exagero da espessura
     ESC                    sai
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,17 +77,71 @@ import numpy as np
 import pygame
 from OpenGL.GL import *
 
+import metricas
+import raycasting
+import shaders
 import transformacoes as T
+from textura import PlanoTexturizado
 from cores import mapear_cores
-from geometria import faixas_2d, tubos_3d
+from geometria import faixas_2d, normais_de_face, tubos_3d
 from leitor_vtk import ler_vtk
 
 LARGURA, ALTURA = 900, 900
-FUNDO = (1.0, 1.0, 1.0)
+# Temas de cor: fundo da cena, texto, caixas de texto e marcador de impacto
+TEMAS = {
+    "escuro": {"fundo": (0.07, 0.08, 0.11), "texto": (225, 230, 240),
+               "fundo_alto": (0.15, 0.19, 0.27), "fundo_baixo": (0.03, 0.035, 0.05),
+               "caixa": (32, 38, 52), "impacto": (1.0, 1.0, 1.0),
+               "apagado": (0.30, 0.32, 0.38)},
+    "claro": {"fundo": (0.96, 0.97, 0.99), "texto": (20, 20, 20),
+              "fundo_alto": (0.82, 0.87, 0.94), "fundo_baixo": (1.0, 1.0, 1.0),
+              "caixa": (245, 247, 250), "impacto": (0.0, 0.0, 0.0),
+              "apagado": (0.78, 0.79, 0.82)},
+    # fundo branco liso: só para as figuras do relatório (não entra no ciclo da tecla Q)
+    "branco": {"fundo": (1.0, 1.0, 1.0), "texto": (20, 20, 20),
+               "fundo_alto": (1.0, 1.0, 1.0), "fundo_baixo": (1.0, 1.0, 1.0),
+               "caixa": (245, 247, 250), "impacto": (0.0, 0.0, 0.0),
+               "apagado": (0.78, 0.79, 0.82)},
+}
+tema = TEMAS["escuro"]         # tema atual (a tecla Q alterna)
+FUNDO = tema["fundo"]
 VERMELHO = (0.8, 0.1, 0.1)
+COR_SELECAO = (1.0, 0.0, 1.0)     # magenta: não existe nos mapas jet e viridis
+COR_CAMINHO = (1.0, 0.82, 0.0)    # amarelo: da raiz até o vaso escolhido
+COR_SUBARVORE = (0.05, 0.85, 0.35)  # verde: tudo o que o vaso irriga
+COR_SANGUE = (0.55, 0.06, 0.07)   # cor dos vasos no modo fluxo
+SENSIBILIDADE = 0.5               # graus de rotação por pixel arrastado
+AMORTECIMENTO = 2.5               # quanto maior, mais rápido a inércia para (1/s)
+ESPERA_GIRO = 6.0                 # segundos sem interação até o giro automático
+RAMPA_GIRO = 2.0                  # segundos para o giro automático atingir a velocidade
+VEL_MAX = 360.0                   # velocidade máxima da inércia (graus por segundo)
+VEL_GIRO = 12.0                   # velocidade do giro automático (graus por segundo)
+FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
+DURACAO_CRESCIMENTO = 7.0         # segundos para a árvore crescer da raiz às pontas
+DURACAO_ARVORE = 2.0              # segundos para o pulso ir da raiz ao terminal mais distante
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
-MAPAS = ["jet", "viridis"]
+# Esquemas de cor dos vasos (tecla C): (grandeza, mapa de cores)
+MAPAS = ["jet", "viridis", "geração"]
+ESQUEMAS = {"jet": ("raio", "jet"), "viridis": ("raio", "viridis"), "geração": ("geração", "plasma")}
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
+LUZ_PADRAO = (0.8, 2.6, 1.4)   # posição inicial da luz pontual (espaço do mundo):
+                               # mais alta que no TP2, para a sombra cair sobre o plano
+# Comparações lado a lado (tecla 7): (campo do Estado, valor à esquerda,
+# valor à direita, rótulo à esquerda, rótulo à direita)
+COMPARACOES = [
+    ("sombreamento", "Flat", "Phong", "Flat", "Phong"),
+    ("sombreamento", "Gouraud", "Phong", "Gouraud", "Phong"),
+    ("filtro", 0, 1, "textura NEAREST", "textura bilinear"),
+    ("neblina", False, True, "sem neblina", "com neblina"),
+    ("sombra", False, True, "sem sombra", "com sombra"),
+    ("opacidade", 0, 2, "opaco", "transparente (0,3)"),
+]
+TAM_SOMBRA = 2048              # resolução do mapa de sombra (texels por lado)
+PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
+CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
+OPACIDADES = [1.0, 0.6, 0.3]
+ORDENS = ["Painter's (trás -> frente)", "sem ordenação"]
+FILTROS = ["NEAREST", "bilinear (OpenGL)", "bilinear (própria)", "coordenadas (u, v)"]
 FOVY = 45.0        # abertura vertical da câmera perspectiva, em graus
 DIST_PADRAO = 3.0  # distância da câmera ao alvo (origem do mundo)
 
@@ -74,7 +164,44 @@ class Estado:
         self.msaa = False
         self.fbo_msaa = None            # framebuffer multiamostrado (criado em main)
         self.amostras_msaa = 0
-        self.vertices = self.cores = self.normais = None
+        self.vertices = self.cores = self.normais = self.normais_face = None
+        self.sombreamento = "Phong"
+        self.componentes = 2            # 0 ambiente, 1 + difusa, 2 + especular
+        self.modo_luz = False
+        self.luz = np.array(LUZ_PADRAO)  # posição da luz no espaço do MUNDO
+        self.intensidade = 1.0
+        self.culling = 0
+        self.zbuffer = True
+        self.ver_profundidade = False
+        self.destacar_tras = False
+        self.tri_desenhados = 0
+        self.opacidade = 0
+        self.ordem = 0
+        self.plano = True
+        self.filtro = 1
+        self.selecionado = None         # índice do vaso escolhido por Ray Casting
+        self.t_selecao = None
+        self.ponto_selecao = None       # ponto de impacto no espaço do mundo
+        self.modo_intervalo = False
+        self.filtro_min = float(arvore.raios.min())
+        self.filtro_max = float(arvore.raios.max())
+        self.painel = True
+        self.metricas = metricas.analisar(arvore)
+        self.fluxo = False
+        self.inicio_crescimento = None  # instante em que a animação começou (None = parada)
+        self.tempo = 0.0
+        self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
+        self.neblina = True
+        self.sombra = True
+        self.comparacao = None          # índice em COMPARACOES, ou None
+        self.divisoria = 0.5            # posição da divisória (fração da largura)
+        self.movendo_divisoria = False
+        self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
+        self.arraste = np.zeros(2)      # rotação arrastada desde o último quadro
+        self.giro_auto = True
+        self.ultima_interacao = 0.0
+        self.ajuda = False
+        self.tau = None
         self.primitiva = GL_LINES
 
         # Normalização: leva o modelo para perto da origem com tamanho ~1,
@@ -86,12 +213,69 @@ class Estado:
         self.restaurar()
 
     def restaurar(self):
+        if hasattr(self, "luz"):
+            self.luz = np.array(LUZ_PADRAO)
+            self.intensidade = 1.0
         self.tx = self.ty = self.tz = 0.0
         self.ang_x = self.ang_y = self.ang_z = 0.0
         self.s = 1.0
         self.vista = 0
         self.dist = DIST_PADRAO
         self.perspectiva = True
+        if hasattr(self, "vel"):
+            self.vel[:] = 0.0
+
+    # ---------------------------------------------------------------- cor
+    def escala_cor(self):
+        """Grandeza que colore os vasos: (valores, mín, máx, mapa, rótulo, formato)."""
+        grandeza, mapa = ESQUEMAS[MAPAS[self.mapa]]
+        if grandeza == "geração":
+            g = self.metricas["geracao"]
+            return g, 0, int(g.max()), mapa, "geração", "{:.0f}"
+        r = self.arvore.raios
+        return r, float(r.min()), float(r.max()), mapa, "raio (mm)", "{:.3f}"
+
+    # ---------------------------------------------------------------- movimento
+    def arrastar(self, dx, dy):
+        """Rotação pelo mouse; o deslocamento também é guardado para a inércia."""
+        d = np.array([dx, dy]) * SENSIBILIDADE
+        self.ang_y += d[0]
+        self.ang_x += d[1]
+        self.arraste += d
+
+    def interagiu(self):
+        """Qualquer tecla, clique ou arraste interrompe o giro automático."""
+        self.ultima_interacao = self.tempo
+
+    def passo_movimento(self, dt, arrastando):
+        """Avança a inércia e o giro automático em dt segundos.
+
+        Enquanto o botão está pressionado, a velocidade é estimada pelo
+        arraste do quadro (média móvel, para suavizar o tremido da mão).
+        Ao soltar, a árvore continua girando com essa velocidade, que decai
+        exponencialmente:  v(t) = v0 e^(-k t)  ->  a cada quadro, v *= e^(-k dt).
+        """
+        if dt <= 0:
+            return
+        if arrastando:
+            self.ultima_interacao = self.tempo     # botão pressionado conta como uso
+            self.vel = 0.5 * self.vel + 0.5 * (self.arraste / dt)
+            self.vel = np.clip(self.vel, -VEL_MAX, VEL_MAX)   # um "arremesso" sem exagero
+            self.arraste[:] = 0.0
+            return
+        self.arraste[:] = 0.0
+
+        if np.abs(self.vel).max() > 0.5:          # inércia
+            self.ang_y += self.vel[0] * dt
+            self.ang_x += self.vel[1] * dt
+            self.vel *= np.exp(-AMORTECIMENTO * dt)
+            self.ultima_interacao = self.tempo     # ainda está "em uso"
+        else:
+            self.vel[:] = 0.0
+
+        ocioso = self.tempo - self.ultima_interacao
+        if self.giro_auto and ocioso > ESPERA_GIRO:  # giro automático, com rampa suave
+            self.ang_y += VEL_GIRO * min(1.0, (ocioso - ESPERA_GIRO) / RAMPA_GIRO) * dt
 
     # ---------------------------------------------------------------- matrizes
     def matriz_modelo(self):
@@ -111,25 +295,26 @@ class Estado:
     def matriz_projecao(self):
         aspecto = LARGURA / ALTURA
         if self.perspectiva:
-            return T.perspectiva(FOVY, aspecto, 0.01, 100.0)
+            return T.perspectiva(FOVY, aspecto, PERTO, LONGE)
         # Caixa ortográfica com a mesma altura que o frustum tem no alvo,
         # para o modelo não "pular" de tamanho ao trocar de projeção
         h = self.dist * np.tan(np.radians(FOVY) / 2)
-        return T.ortografica(-h * aspecto, h * aspecto, -h, h, 0.01, 100.0)
+        return T.ortografica(-h * aspecto, h * aspecto, -h, h, PERTO, LONGE)
 
     # ---------------------------------------------------------------- geometria
     def reconstruir(self):
         arv = self.arvore
-        cores_seg = mapear_cores(arv.raios, arv.raios.min(), arv.raios.max(),
-                                 MAPAS[self.mapa])
+        valores, vmin, vmax, nome_mapa, _, _ = self.escala_cor()
+        cores_seg = mapear_cores(valores, vmin, vmax, nome_mapa)
         if self.modo == 2:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
         raio = arv.raios * MM_PARA_M * self.exagero
-        self.normais = None
+        self.normais = self.normais_face = self.tau = self.ordem_crescimento = None
         if self.modo == 0:                    # linhas
             self.vertices = arv.pontos[arv.segmentos].reshape(-1, 3)
-            self.cores = np.repeat(cores_seg, 2, axis=0)
+            seg_id = np.repeat(np.arange(arv.n_segmentos), 2)
+            self.cores = cores_seg[seg_id]
             self.primitiva = GL_LINES
         elif not arv.eh_3d:                   # 2D: faixas planas
             self.vertices, seg_id = faixas_2d(arv.pontos, arv.segmentos, raio)
@@ -137,19 +322,137 @@ class Estado:
             self.primitiva = GL_TRIANGLES
         else:                                 # 3D: tubos com normais para iluminação
             self.vertices, self.normais, seg_id = tubos_3d(arv.pontos, arv.segmentos, raio)
+            self.normais_face = normais_de_face(self.vertices, self.normais)
+            s = self.posicao_no_vaso(seg_id)
+            self.tau = self.tau_dos_vertices(seg_id, s)
+            self.ordem_crescimento = (self.metricas["geracao"][seg_id] + s).astype(np.float32)
             self.cores = cores_seg[seg_id]
+            # dados por triângulo para o culling próprio: normal e centroide
+            self.tri_normal = self.normais_face[::3].astype(float)
+            self.tri_centro = self.vertices.reshape(-1, 3, 3).mean(axis=1).astype(float)
             self.primitiva = GL_TRIANGLES
 
         self.vertices = np.ascontiguousarray(self.vertices, dtype=np.float32)
-        self.cores = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.seg_id = seg_id                         # de qual vaso é cada vértice
+        self.cores_base = np.ascontiguousarray(self.cores, dtype=np.float32)
+        self.cores = self.cores_com_selecao()
         self.enviar_para_gpu()
+
+    # ---------------------------------------------------------------- fluxo
+    def posicao_no_vaso(self, seg_id):
+        """s em [0, 1]: projeção de cada vértice no eixo do seu vaso, da ponta
+        proximal (do lado da raiz) para a distal."""
+        arv, met = self.arvore, self.metricas
+        a, b = arv.segmentos[:, 0], arv.segmentos[:, 1]
+        prox = np.where(met["proximal"] == a, a, b)
+        dist = np.where(met["proximal"] == a, b, a)
+        A, B = arv.pontos[prox][seg_id], arv.pontos[dist][seg_id]
+        eixo = B - A
+        s = ((self.vertices - A) * eixo).sum(axis=1) / (eixo * eixo).sum(axis=1)
+        return np.clip(s, 0.0, 1.0)
+
+    def tau_dos_vertices(self, seg_id, s):
+        """Instante de chegada do pulso em cada vértice dos tubos:
+            tau = tau_entrada + s * duração_da_travessia
+        escalado para o pulso levar DURACAO_ARVORE segundos até o terminal
+        mais distante."""
+        entrada, travessia = metricas.tempos_de_transito(self.arvore, self.metricas)
+        tau = entrada[seg_id] + s * travessia[seg_id]
+        return (tau / (entrada + travessia).max() * DURACAO_ARVORE).astype(np.float32)
+
+    def nivel_crescimento(self):
+        """Até que 'ordem' a árvore já cresceu, ou None se não há animação.
+
+        O nível vai de 0 a geração_máxima + 1 em DURACAO_CRESCIMENTO segundos;
+        quando passa do fim, a animação termina e a árvore fica completa."""
+        if self.inicio_crescimento is None:
+            return None
+        g_max = self.metricas["geracao_max"] + 1
+        nivel = (self.tempo - self.inicio_crescimento) / DURACAO_CRESCIMENTO * g_max
+        if nivel >= g_max + 0.5:
+            self.inicio_crescimento = None
+            return None
+        return nivel
+
+    def atualizar_cores(self):
+        """Recalcula as cores (seleção / fluxo) e reenvia só o VBO de cores."""
+        self.cores = self.cores_com_selecao()
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbos[1])
+        glBufferData(GL_ARRAY_BUFFER, self.cores.nbytes, self.cores, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    # ---------------------------------------------------------------- filtro
+    def visiveis(self):
+        """Máscara dos vasos dentro do intervalo de raio escolhido."""
+        r = self.arvore.raios
+        return (r >= self.filtro_min - 1e-9) & (r <= self.filtro_max + 1e-9)
+
+    def filtro_ativo(self):
+        return not self.visiveis().all()
+
+    def ajustar_filtro(self, d_min, d_max):
+        r = self.arvore.raios
+        passo = (r.max() - r.min()) / 20
+        self.filtro_min = float(np.clip(self.filtro_min + d_min * passo, r.min(), self.filtro_max))
+        self.filtro_max = float(np.clip(self.filtro_max + d_max * passo, self.filtro_min, r.max()))
+
+    # ---------------------------------------------------------------- seleção
+    def cores_com_selecao(self):
+        """Sem seleção: cores normais. Com seleção: o resto fica cinza e se
+        destacam o caminho até a raiz, a subárvore irrigada e o próprio vaso."""
+        if self.selecionado is None:
+            if self.fluxo and self.normais is not None:
+                return np.ascontiguousarray(np.tile(COR_SANGUE, (len(self.vertices), 1)),
+                                            dtype=np.float32)
+            return self.cores_base.copy()
+        ter = metricas.territorio(self.arvore, self.metricas, self.selecionado)
+        cor_do_vaso = np.tile(tema["apagado"], (self.arvore.n_segmentos, 1))
+        cor_do_vaso[ter["caminho"]] = COR_CAMINHO
+        cor_do_vaso[ter["subarvore"]] = COR_SUBARVORE
+        cor_do_vaso[self.selecionado] = COR_SELECAO
+        return np.ascontiguousarray(cor_do_vaso[self.seg_id], dtype=np.float32)
+
+    def selecionar(self, px, py):
+        """Ray Casting: raio pelo pixel clicado e primeiro vaso atingido."""
+        arv = self.arvore
+        visao, modelo = self.matriz_visao(), self.matriz_modelo()
+        O, D = raycasting.raio_do_pixel(px, py, LARGURA, ALTURA, self.matriz_projecao(), visao)
+        Om, Dm = raycasting.para_modelo(O, D, modelo)
+        raio = arv.raios * MM_PARA_M * self.exagero        # mesma espessura dos tubos
+        idx = np.nonzero(self.visiveis())[0]                # vasos escondidos não contam
+        i, self.t_selecao = raycasting.escolher_vaso(
+            Om, Dm, arv.pontos, arv.segmentos[idx], raio[idx])
+        self.selecionado = None if i is None else int(idx[i])
+        self.ponto_selecao = None if self.t_selecao is None else O + self.t_selecao * D
+        self.atualizar_cores()            # só a cor muda: reenvia apenas o VBO de cores
+        print(f"raio O = {np.round(O, 3)}  D = {np.round(D / np.linalg.norm(D), 3)}  ->  "
+              + ("nenhum vaso" if self.selecionado is None else
+                 f"vaso {self.selecionado}, t = {self.t_selecao:.4f}"))
+
+    def info_selecao(self):
+        if self.selecionado is None:
+            return None
+        arv = self.arvore
+        a, b = arv.pontos[arv.segmentos[self.selecionado]]
+        comprimento = np.linalg.norm(b - a) / MM_PARA_M
+        geracao = self.metricas["geracao"][self.selecionado]
+        ter = metricas.territorio(arv, self.metricas, self.selecionado)
+        linha1 = (f"vaso {self.selecionado} | geração {geracao} | "
+                  f"raio {arv.raios[self.selecionado]:.3f} mm | "
+                  f"comprimento {comprimento:.2f} mm | t = {self.t_selecao:.4f}")
+        linha2 = (f"irriga {ter['terminais']} de {self.metricas['n_terminais']} terminais "
+                  f"({100 * ter['fracao_fluxo']:.1f}% do fluxo) | subárvore com "
+                  f"{100 * ter['fracao_volume']:.1f}% do volume dos vasos")
+        return (linha1 + "\n" + linha2).replace(".", ",")
 
     def enviar_para_gpu(self):
         """Copia os arrays para buffers do OpenGL (VBOs) uma única vez.
         Sem isso, os ~400 mil vértices dos tubos seriam reenviados a cada quadro."""
         if not hasattr(self, "vbos"):
-            self.vbos = glGenBuffers(3)
-        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais)):
+            self.vbos = glGenBuffers(6)     # posição, cor, normal, normal da face, tau, ordem
+            self.ebo = glGenBuffers(1)      # índices dos triângulos visíveis (culling próprio)
+        for vbo, dados in zip(self.vbos, (self.vertices, self.cores, self.normais,
+                                          self.normais_face, self.tau, self.ordem_crescimento)):
             if dados is not None:
                 dados = np.ascontiguousarray(dados, dtype=np.float32)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -162,49 +465,365 @@ class Estado:
             aa = "MSAA indisponível"
         else:
             aa = f"MSAA {self.amostras_msaa}x ligado" if self.msaa else "MSAA desligado"
-        return (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
-                f"{MODOS[self.modo]} | exagero {self.exagero:.1f}x | {aa}")
+        texto = (f"{self.arvore.nome} | {proj} | vista {VISTAS[self.vista][0]} | "
+                 f"{MODOS[self.modo]} | {aa}")
+        if self.plano and self.arvore.eh_3d:
+            texto += f" | textura: {FILTROS[self.filtro]}"
+        if self.comparacao is not None:
+            _, _, _, esq, dir_ = COMPARACOES[self.comparacao]
+            texto += f"\ncomparação: {esq} | {dir_}  (arraste a linha para mover)"
+        if self.filtro_ativo() or self.modo_intervalo:
+            texto += (f"\nfiltro de raio [{self.filtro_min:.3f}, {self.filtro_max:.3f}] mm: "
+                      f"{int(self.visiveis().sum())}/{self.arvore.n_segmentos} vasos"
+                      ).replace(".", ",")
+            if self.modo_intervalo:
+                texto += " | MODO INTERVALO"
+        if self.normais is not None:
+            total = len(self.vertices) // 3
+            texto += (f"\nculling {CULLING[self.culling]}: {self.tri_desenhados}/{total} "
+                      f"triângulos | Z-Buffer {'ligado' if self.zbuffer else 'desligado'}")
+            if OPACIDADES[self.opacidade] < 1.0:
+                texto += (f" | opacidade {OPACIDADES[self.opacidade]:.1f}".replace(".", ",")
+                          + f" | ordem: {ORDENS[self.ordem]}")
+            somb = "Phong (fluxo animado)" if self.fluxo else self.sombreamento
+            nivel = self.nivel_crescimento()
+            if nivel is not None:
+                somb = (f"Phong (crescimento: geração {min(int(nivel), self.metricas['geracao_max'])}"
+                        f" de {self.metricas['geracao_max']})")
+            texto += (f"\n{somb} | {COMPONENTES[self.componentes]} | "
+                      f"luz ({self.luz[0]:.1f}, {self.luz[1]:.1f}, {self.luz[2]:.1f}) "
+                      f"x{self.intensidade:.1f}")
+            if self.modo_luz:
+                texto += " | MODO LUZ"
+        return texto
 
 
 # -------------------------------------------------------------------- desenho
+# coeficientes do modelo de Blinn-Phong
+KA, KD, KS, BRILHO = 0.25, 0.75, 0.6, 40.0
+COMPONENTES = ["só ambiente", "ambiente + difusa", "ambiente + difusa + especular"]
+programas = {}              # criados em inicializar_gl(), quando já existe contexto
+
+
 def desenhar_arvore(estado):
+    modelview = estado.matriz_visao() @ estado.matriz_modelo()
+    if estado.normais is not None:
+        desenhar_com_shader(estado, modelview)
+        return
+
     glMatrixMode(GL_MODELVIEW)
-    glLoadMatrixf(T.para_opengl(estado.matriz_visao() @ estado.matriz_modelo()))
-
-    vbo_v, vbo_c, vbo_n = estado.vbos
-    iluminar = estado.normais is not None
-    if iluminar:
-        glEnable(GL_LIGHTING)
-        glEnableClientState(GL_NORMAL_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_n)
-        glNormalPointer(GL_FLOAT, 0, None)     # None = começa no início do buffer
-
+    glLoadMatrixf(T.para_opengl(modelview))
+    vbo_v, vbo_c = estado.vbos[:2]
     glEnableClientState(GL_VERTEX_ARRAY)
     glEnableClientState(GL_COLOR_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_v)
     glVertexPointer(3, GL_FLOAT, 0, None)
     glBindBuffer(GL_ARRAY_BUFFER, vbo_c)
     glColorPointer(3, GL_FLOAT, 0, None)
-    glDrawArrays(estado.primitiva, 0, len(estado.vertices))
+    if estado.filtro_ativo():
+        # só os vértices dos vasos visíveis, por um buffer de índices
+        indices = np.nonzero(estado.visiveis()[estado.seg_id])[0].astype(np.uint32)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(estado.primitiva, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+    else:
+        glDrawArrays(estado.primitiva, 0, len(estado.vertices))
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glDisableClientState(GL_COLOR_ARRAY)
     glDisableClientState(GL_VERTEX_ARRAY)
 
-    if iluminar:
-        glDisableClientState(GL_NORMAL_ARRAY)
-        glDisable(GL_LIGHTING)
+
+def desenhar_com_shader(estado, modelview):
+    """Tubos: as matrizes do grupo e a luz vão como uniforms e a iluminação
+    é calculada pelos nossos shaders, sem o pipeline fixo."""
+    em_fluxo = estado.fluxo and estado.tau is not None
+    nivel = estado.nivel_crescimento()
+    # o fluxo e o crescimento são efeitos do shader Phong
+    prog = programas["Phong" if (em_fluxo or nivel is not None) else estado.sombreamento]
+    prog.usar()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", modelview)
+    prog.mat3("u_normal", shaders.matriz_normal(modelview))
+
+    enviar_luz(prog, estado)
+    enviar_neblina(prog, estado)
+
+    # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
+    # recebe as normais de FACE em vez das normais dos vértices.
+    prog.float("u_destacar_tras", 1.0 if estado.destacar_tras else 0.0)
+    if em_fluxo:
+        prog.float("u_fluxo", 1.0)
+        prog.float("u_tempo", estado.tempo)
+        prog.float("u_frequencia", FREQUENCIA)
+    elif prog is programas["Phong"]:
+        prog.float("u_fluxo", 0.0)
+    if prog is programas["Phong"]:
+        prog.float("u_crescendo", 1.0 if nivel is not None else 0.0)
+        prog.float("u_nivel", nivel if nivel is not None else 0.0)
+
+    vbo_v, vbo_c, vbo_n, vbo_nf, vbo_tau, vbo_ordem = estado.vbos
+    vbo_normal = vbo_nf if prog is programas["Flat"] else vbo_n
+    for local, vbo in enumerate((vbo_v, vbo_c, vbo_normal)):
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, 3, GL_FLOAT, GL_FALSE, 0, None)
+    for local, vbo in ((3, vbo_tau), (4, vbo_ordem)):   # 1 float por vértice
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, 1, GL_FLOAT, GL_FALSE, 0, None)
+
+    total = len(estado.vertices) // 3
+    modo = CULLING[estado.culling]
+    alfa = OPACIDADES[estado.opacidade]
+    prog.float("u_alfa", alfa)
+    transparente = alfa < 1.0
+    painter = transparente and ORDENS[estado.ordem].startswith("Painter")
+
+    # lista de triângulos: filtrada (raio e/ou culling próprio) e ordenada (Painter)
+    mascara = None
+    if estado.filtro_ativo():
+        mascara = estado.visiveis()[estado.seg_id[::3]]       # vaso de cada triângulo
+    if modo == "próprio (N·V)":
+        frente = np.zeros(total, dtype=bool)
+        frente[triangulos_de_frente(estado, modelview)] = True
+        mascara = frente if mascara is None else mascara & frente
+    tris = None if mascara is None else np.nonzero(mascara)[0]
+    if painter:
+        tris = ordenar_tras_para_frente(estado, modelview,
+                                        np.arange(total) if tris is None else tris)
+
+    if modo == "OpenGL":
+        # o OpenGL decide pela ORDEM dos vértices já projetados na tela:
+        # anti-horário = frente (glFrontFace), horário = trás (descartada)
+        glEnable(GL_CULL_FACE)
+        glFrontFace(GL_CCW)
+        glCullFace(GL_BACK)
+    if painter:
+        # já ordenados: o Z-Buffer continua TESTANDO (objetos opacos tapam),
+        # mas não GRAVA, para um vaso transparente não esconder o de trás
+        glDepthMask(GL_FALSE)
+
+    if tris is None:
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+        estado.tri_desenhados = total     # o OpenGL não informa quantos descartou
+    else:
+        indices = (tris[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        estado.tri_desenhados = len(tris)
+
+    glDepthMask(GL_TRUE)
+    glDisable(GL_CULL_FACE)
+
+    for local in range(5):
+        glDisableVertexAttribArray(local)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glUseProgram(0)
 
 
-def configurar_iluminacao():
-    """Iluminação da API (OpenGL fixo), usada só para dar volume aos tubos.
-    Uma luz direcional + luz ambiente; o estudo de iluminação é tema do TP2."""
-    glEnable(GL_LIGHT0)
-    glLightfv(GL_LIGHT0, GL_AMBIENT, (0.5, 0.5, 0.5, 1.0))
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.6, 0.6, 0.6, 1.0))
-    glEnable(GL_COLOR_MATERIAL)                     # a cor do vértice vira o material
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-    glEnable(GL_NORMALIZE)                          # a matriz M tem escala: renormaliza
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
+def triangulos_de_frente(estado, modelview):
+    """Back-Face Culling próprio: índices dos triângulos com N . V > 0.
+
+    No espaço da câmera, N é a normal da face e V aponta do triângulo para
+    o observador. Na perspectiva o observador está na origem, então
+    V = -centroide; na ortográfica todos os raios são paralelos a +z,
+    então V = (0, 0, 1). Se N . V <= 0, a face está de costas e é descartada.
+    """
+    normais = estado.tri_normal @ shaders.matriz_normal(modelview).T
+    if estado.perspectiva:
+        centros = estado.tri_centro @ modelview[:3, :3].T + modelview[:3, 3]
+        n_dot_v = -(normais * centros).sum(axis=1)
+    else:
+        n_dot_v = normais[:, 2]
+    return np.nonzero(n_dot_v > 0)[0]
+
+
+def ordenar_tras_para_frente(estado, modelview, tris):
+    """Painter's Algorithm: ordena os triângulos do mais distante ao mais próximo.
+
+    No espaço da câmera o observador olha para -z: quanto MAIS negativo o z
+    do centroide, mais longe está o triângulo. Desenhando nessa ordem, cada
+    triângulo transparente é composto sobre tudo o que está atrás dele,
+    como um pintor que pinta o fundo primeiro.
+    """
+    z = estado.tri_centro[tris] @ modelview[2, :3] + modelview[2, 3]
+    return tris[np.argsort(z, kind="stable")]
+
+
+def enviar_neblina(prog, estado):
+    """A neblina vai do ponto mais próximo ao mais distante da árvore: o centro
+    do modelo está em (tx, ty, tz) no mundo e o modelo normalizado tem raio ~s."""
+    centro = estado.matriz_visao() @ np.array([estado.tx, estado.ty, estado.tz, 1.0])
+    distancia = -centro[2]
+    prog.float("u_neblina", 1.0 if estado.neblina else 0.0)
+    prog.float("u_neb_perto", distancia - 0.7 * estado.s)
+    prog.float("u_neb_longe", distancia + 0.9 * estado.s)
+    prog.vec3("u_fundo_baixo", tema["fundo_baixo"])
+    prog.vec3("u_fundo_alto", tema["fundo_alto"])
+    prog.float("u_altura_tela", ALTURA)
+
+
+def enviar_luz(prog, estado):
+    """Uniforms da iluminação, comuns aos vasos e ao plano."""
+    # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
+    luz_camera = estado.matriz_visao() @ np.append(estado.luz, 1.0)
+    prog.vec3("u_luz_pos", luz_camera[:3])
+    prog.float("u_intensidade", estado.intensidade)
+    prog.float("u_ka", KA)
+    prog.float("u_kd", KD)
+    prog.float("u_ks", KS)
+    prog.float("u_brilho", BRILHO)
+    prog.float("u_usar_difusa", 1.0 if estado.componentes >= 1 else 0.0)
+    prog.float("u_usar_especular", 1.0 if estado.componentes >= 2 else 0.0)
+
+
+plano_ref = None            # criado em inicializar_gl()
+
+
+# -------------------------------------------------------------------- sombra
+mapa_sombra = {}            # FBO e textura de profundidade, criados em inicializar_gl()
+
+
+def criar_mapa_sombra():
+    """Framebuffer só com profundidade: o 'filme' de uma câmera posta na luz."""
+    tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, tex)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, TAM_SOMBRA, TAM_SOMBRA, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, None)
+    for parametro in (GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER):
+        glTexParameteri(GL_TEXTURE_2D, parametro, GL_NEAREST)
+    for parametro in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T):
+        glTexParameteri(GL_TEXTURE_2D, parametro, GL_CLAMP_TO_EDGE)
+    fbo = glGenFramebuffers(1)
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0)
+    glDrawBuffer(GL_NONE)                       # nenhuma cor: só profundidade
+    glReadBuffer(GL_NONE)
+    completo = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    if completo:
+        mapa_sombra.update(fbo=fbo, tex=tex)
+
+
+def matriz_luz(estado):
+    """P_luz . V_luz: uma câmera perspectiva posta na luz, olhando para o
+    centro da árvore, com abertura justa para enquadrar a árvore inteira
+    (quanto mais justa, mais texels do mapa caem sobre a árvore)."""
+    centro = np.array([estado.tx, estado.ty, estado.tz])
+    para_luz = estado.luz - centro
+    d = float(np.linalg.norm(para_luz))
+    cima = (0, 0, 1) if abs(para_luz[1]) > 0.99 * d else (0, 1, 0)
+    raio = 1.25 * estado.s                      # raio da esfera que contém a árvore
+    abertura = 2 * np.degrees(np.arctan(raio / max(d, raio * 1.05)))
+    V = T.olhar_para(estado.luz, centro, cima)
+    P = T.perspectiva(abertura, 1.0, max(d - 2 * raio, 0.05), d + 2 * raio)
+    return P @ V
+
+
+def usar_sombra(estado):
+    return (estado.sombra and estado.plano and estado.tau is not None
+            and "fbo" in mapa_sombra)
+
+
+def passada_sombra(estado):
+    """1ª passada: desenha a árvore vista da luz e guarda só a profundidade."""
+    comparando_sombra = (estado.comparacao is not None
+                         and COMPARACOES[estado.comparacao][0] == "sombra")
+    original = estado.sombra
+    if comparando_sombra:
+        estado.sombra = True
+    ativo = usar_sombra(estado)
+    estado.sombra = original
+    if not ativo:
+        return
+    glBindFramebuffer(GL_FRAMEBUFFER, mapa_sombra["fbo"])
+    glViewport(0, 0, TAM_SOMBRA, TAM_SOMBRA)
+    glClear(GL_DEPTH_BUFFER_BIT)
+    glEnable(GL_DEPTH_TEST)
+    glDepthFunc(GL_LESS)
+
+    prog = programas["Sombra"]
+    prog.usar()
+    prog.mat4("u_mvp", matriz_luz(estado) @ estado.matriz_modelo())
+    nivel = estado.nivel_crescimento()
+    prog.float("u_crescendo", 1.0 if nivel is not None else 0.0)
+    prog.float("u_nivel", nivel if nivel is not None else 0.0)
+    for local, vbo, comp in ((0, estado.vbos[0], 3), (4, estado.vbos[5], 1)):
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, comp, GL_FLOAT, GL_FALSE, 0, None)
+    if estado.filtro_ativo():                   # vasos escondidos pelo filtro não fazem sombra
+        tris = np.nonzero(estado.visiveis()[estado.seg_id[::3]])[0]
+        indices = (tris[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+    else:
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+    for local in (0, 4):
+        glDisableVertexAttribArray(local)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glUseProgram(0)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    glViewport(0, 0, LARGURA, ALTURA)
+
+
+def desenhar_plano(estado):
+    """Plano de referência texturizado. Fica no espaço do MUNDO (usa só V),
+    como um piso: não acompanha as transformações do modelo."""
+    prog = programas["Textura"]
+    prog.usar()
+    visao = estado.matriz_visao()
+    prog.mat4("u_projecao", estado.matriz_projecao())
+    prog.mat4("u_modelview", visao)
+    prog.mat3("u_normal", shaders.matriz_normal(visao))
+    enviar_luz(prog, estado)
+    enviar_neblina(prog, estado)
+    prog.int("u_textura", 0)                    # unidade de textura 0
+    prog.int("u_modo", estado.filtro)
+    sombra = usar_sombra(estado)
+    prog.float("u_usar_sombra", 1.0 if sombra else 0.0)
+    prog.int("u_mapa_sombra", 1)                # unidade de textura 1
+    prog.mat4("u_luz_matriz", matriz_luz(estado) if sombra else np.identity(4))
+    if sombra:
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, mapa_sombra["tex"])
+        glActiveTexture(GL_TEXTURE0)
+    filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
+    plano_ref.desenhar(filtro_gl, escuro=tema is TEMAS["escuro"])
+    glActiveTexture(GL_TEXTURE1)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    glActiveTexture(GL_TEXTURE0)
+    glUseProgram(0)
+
+
+def desenhar_impacto(estado):
+    """Marca o ponto onde o raio de seleção atingiu o vaso."""
+    if estado.ponto_selecao is None:
+        return
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(8.0)
+    glBegin(GL_POINTS)
+    glColor3f(*tema["impacto"])
+    glVertex3f(*estado.ponto_selecao)
+    glEnd()
+
+
+def desenhar_luz(estado):
+    """Marcador amarelo na posição da luz (só a matriz de visão: a luz é do mundo)."""
+    glMatrixMode(GL_MODELVIEW)
+    glLoadMatrixf(T.para_opengl(estado.matriz_visao()))
+    glPointSize(14.0 if estado.modo_luz else 9.0)
+    glBegin(GL_POINTS)
+    glColor3f(1.0, 0.8, 0.0)
+    glVertex3f(*estado.luz)
+    glEnd()
 
 
 def desenhar_eixos(estado):
@@ -222,9 +841,10 @@ def desenhar_eixos(estado):
     glLineWidth(2.0)
 
 
-def desenhar_texto(fonte, texto, x, y):
-    """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda)."""
-    superficie = fonte.render(texto, True, (20, 20, 20))
+def desenhar_texto(fonte, texto, x, y, fundo=None, cor=None):
+    """Escreve texto na tela em coordenadas de pixel (origem embaixo à esquerda).
+    Sem 'cor', usa a cor de texto do tema atual."""
+    superficie = fonte.render(texto, True, cor or tema["texto"], fundo)
     dados = pygame.image.tobytes(superficie, "RGBA", True)
     glWindowPos2d(x, y)
     glDrawPixels(superficie.get_width(), superficie.get_height(),
@@ -236,8 +856,9 @@ def desenhar_barra_cores(estado, fonte):
     arv = estado.arvore
     x0, x1, y0, y1 = LARGURA * 0.3, LARGURA * 0.7, ALTURA - 60, ALTURA - 40
     passos = 64
-    valores = np.linspace(arv.raios.min(), arv.raios.max(), passos + 1)
-    cores = mapear_cores(valores, valores[0], valores[-1], MAPAS[estado.mapa])
+    _, vmin, vmax, nome_mapa, rotulo, formato = estado.escala_cor()
+    valores = np.linspace(vmin, vmax, passos + 1)
+    cores = mapear_cores(valores, vmin, vmax, nome_mapa)
     xs = np.linspace(x0, x1, passos + 1)
 
     glMatrixMode(GL_PROJECTION)
@@ -252,9 +873,27 @@ def desenhar_barra_cores(estado, fonte):
         glVertex2f(x, y1)
     glEnd()
 
-    desenhar_texto(fonte, f"{arv.raios.min():.3f}", x0 - 55, y0 + 2)
-    desenhar_texto(fonte, f"{arv.raios.max():.3f}", x1 + 8, y0 + 2)
-    desenhar_texto(fonte, "raio (mm)", LARGURA / 2 - 35, y1 + 6)
+    if (estado.filtro_ativo() or estado.modo_intervalo) and rotulo.startswith("raio"):
+        # véu sobre a parte da escala que está fora do filtro (o filtro é por raio)
+        rmin, rmax = arv.raios.min(), arv.raios.max()
+        xa = x0 + (estado.filtro_min - rmin) / (rmax - rmin) * (x1 - x0)
+        xb = x0 + (estado.filtro_max - rmin) / (rmax - rmin) * (x1 - x0)
+        glColor4f(*tema["fundo"], 0.8)          # véu da cor do fundo
+        glBegin(GL_QUADS)
+        for a, b in ((x0, xa), (xb, x1)):
+            glVertex2f(a, y0 - 2); glVertex2f(b, y0 - 2)
+            glVertex2f(b, y1 + 2); glVertex2f(a, y1 + 2)
+        glEnd()
+        glColor3f(*[c / 255 for c in tema["texto"]])
+        glBegin(GL_LINES)
+        for x in (xa, xb):
+            glVertex2f(x, y0 - 5); glVertex2f(x, y1 + 5)
+        glEnd()
+
+    texto_min, texto_max = formato.format(vmin), formato.format(vmax)
+    desenhar_texto(fonte, texto_min, x0 - 8 - fonte.size(texto_min)[0], y0 + 2)
+    desenhar_texto(fonte, texto_max, x1 + 8, y0 + 2)
+    desenhar_texto(fonte, rotulo, LARGURA / 2 - fonte.size(rotulo)[0] / 2, y1 + 6)
 
 
 def criar_fbo_msaa(amostras=4):
@@ -286,23 +925,66 @@ def criar_fbo_msaa(amostras=4):
         return None, 0
 
 
+def mostrar_profundidade(estado):
+    """Lê o Z-Buffer e desenha a profundidade em tons de cinza (perto = escuro).
+
+    O buffer guarda d em [0, 1], que NÃO é linear na distância quando a
+    projeção é perspectiva. A conversão para a distância z da câmera é a
+    inversa da projeção:  z = 2 n f / ((f + n) - (2d - 1)(f - n)).
+    """
+    glPixelStorei(GL_PACK_ALIGNMENT, 1)
+    d = np.frombuffer(glReadPixels(0, 0, LARGURA, ALTURA, GL_DEPTH_COMPONENT, GL_FLOAT),
+                      dtype=np.float32).reshape(ALTURA, LARGURA).astype(float)
+    fundo = d >= 1.0
+    if estado.perspectiva:
+        z = 2 * PERTO * LONGE / ((LONGE + PERTO) - (2 * d - 1) * (LONGE - PERTO))
+    else:
+        z = PERTO + d * (LONGE - PERTO)
+    cinza = np.full_like(z, 255.0)
+    if (~fundo).any():
+        zmin, zmax = z[~fundo].min(), z[~fundo].max()
+        cinza[~fundo] = 20 + 200 * (z[~fundo] - zmin) / max(zmax - zmin, 1e-9)
+    img = np.repeat(cinza[:, :, None], 3, axis=2).astype(np.uint8)
+    glClear(GL_COLOR_BUFFER_BIT)
+    glWindowPos2d(0, 0)
+    glDrawPixels(LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(img))
+
+
+def desenhar_fundo():
+    """Fundo em gradiente vertical: um retângulo do tamanho da tela com uma cor
+    em cima e outra embaixo; o rasterizador interpola entre elas."""
+    glDisable(GL_DEPTH_TEST)
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, 1, 0, 1, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glBegin(GL_QUADS)
+    glColor3f(*tema["fundo_baixo"]); glVertex2f(0, 0); glVertex2f(1, 0)
+    glColor3f(*tema["fundo_alto"]);  glVertex2f(1, 1); glVertex2f(0, 1)
+    glEnd()
+
+
+def trocar_tema(nome=None):
+    """Alterna (ou escolhe) o tema de cores da interface e da cena."""
+    global tema
+    if nome is None:
+        nome = "claro" if tema is TEMAS["escuro"] else "escuro"
+    tema = TEMAS[nome]
+
+
 def desenhar_quadro(estado, fonte):
-    usar_msaa = estado.msaa and estado.fbo_msaa is not None
+    passada_sombra(estado)                     # antes de tudo: o mapa de sombra
+    glClearColor(*tema["fundo"], 1.0)
+    # o Z-Buffer é lido da janela; o FBO multiamostrado não pode ser lido direto
+    usar_msaa = estado.msaa and estado.fbo_msaa is not None and not estado.ver_profundidade
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
         glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-    glEnable(GL_DEPTH_TEST)                   # cena 3D com teste de profundidade
-    glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
-    glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
-
-    # Luz definida com a modelview identidade: fica presa à câmera ("lanterna")
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-    glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.6, 1.0, 0.0))
-    if estado.eixos:
-        desenhar_eixos(estado)
-    desenhar_arvore(estado)
+    if estado.comparacao is None:
+        desenhar_cena(estado)
+    else:
+        desenhar_comparacao(estado)
 
     if usar_msaa:                              # resolve: média das amostras -> janela
         glBindFramebuffer(GL_READ_FRAMEBUFFER, estado.fbo_msaa)
@@ -311,16 +993,288 @@ def desenhar_quadro(estado, fonte):
                           GL_COLOR_BUFFER_BIT, GL_NEAREST)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+    if estado.ver_profundidade:
+        mostrar_profundidade(estado)
+
     glDisable(GL_DEPTH_TEST)                  # sobreposições 2D sempre por cima
+    if estado.comparacao is not None:
+        desenhar_divisoria(estado, fonte)
+    desenhar_sobreposicoes(estado, fonte)
+
+
+def desenhar_cena(estado):
+    """Fundo, plano, árvore e marcadores: tudo o que é 3D."""
+    desenhar_fundo()
+
+    # Z-Buffer: cada fragmento só é escrito se estiver mais perto que o já gravado
+    if estado.zbuffer:
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+    else:
+        glDisable(GL_DEPTH_TEST)               # vale o último desenhado (ordem do VBO)
+    glMatrixMode(GL_PROJECTION)               # projeção vale para eixos e árvore
+    glLoadMatrixf(T.para_opengl(estado.matriz_projecao()))
+
+    if estado.eixos:
+        desenhar_eixos(estado)
+    if estado.plano and estado.arvore.eh_3d:
+        desenhar_plano(estado)                 # opaco: antes dos vasos transparentes
+    desenhar_arvore(estado)
+    if estado.normais is not None:
+        desenhar_luz(estado)
+    desenhar_impacto(estado)
+
+
+def desenhar_comparacao(estado):
+    """A mesma cena desenhada duas vezes, cada uma recortada a um lado da tela.
+
+    glScissor limita a escrita de pixels a um retângulo: a 1ª passada só
+    alcança a parte à esquerda da divisória, a 2ª só a parte à direita.
+    O Z-Buffer é limpo entre as passadas (também só dentro do retângulo).
+    """
+    campo, valor_esq, valor_dir, _, _ = COMPARACOES[estado.comparacao]
+    original = getattr(estado, campo)
+    x = int(estado.divisoria * LARGURA)
+    glEnable(GL_SCISSOR_TEST)
+    for x0, largura, valor in ((0, x, valor_esq), (x, LARGURA - x, valor_dir)):
+        setattr(estado, campo, valor)
+        glScissor(x0, 0, max(largura, 0), ALTURA)
+        glClear(GL_DEPTH_BUFFER_BIT)
+        desenhar_cena(estado)
+    glDisable(GL_SCISSOR_TEST)                # o blit do MSAA também respeitaria o recorte
+    setattr(estado, campo, original)
+
+
+def desenhar_divisoria(estado, fonte):
+    """Linha vertical com um puxador e os rótulos de cada lado."""
+    x = estado.divisoria * LARGURA
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, LARGURA, 0, ALTURA, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glColor3f(1.0, 0.82, 0.3)
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    glVertex2f(x, 0); glVertex2f(x, ALTURA)
+    glEnd()
+    glLineWidth(2.0)
+    glBegin(GL_QUADS)                          # puxador no meio da linha
+    for dx, dy in ((-9, -26), (9, -26), (9, 26), (-9, 26)):
+        glVertex2f(x + dx, ALTURA / 2 + dy)
+    glEnd()
+
+    _, _, _, esq, dir_ = COMPARACOES[estado.comparacao]
+    y = ALTURA - 100
+    rotulo_esq = f" {esq} "
+    desenhar_texto(fonte, rotulo_esq, x - 10 - fonte.size(rotulo_esq)[0], y, tema["caixa"])
+    desenhar_texto(fonte, f" {dir_} ", x + 10, y, tema["caixa"])
+
+
+def desenhar_sobreposicoes(estado, fonte):
+    """Textos e painéis 2D por cima da cena."""
+    if not estado.hud:
+        return
+    if estado.ajuda:                          # a ajuda substitui os outros textos
+        desenhar_ajuda()
+        return
     if estado.modo != 2:
         desenhar_barra_cores(estado, fonte)
-    desenhar_texto(fonte, estado.descricao(), 10, 10)
+    for i, linha in enumerate(reversed(estado.descricao().split("\n"))):
+        desenhar_texto(fonte, linha, 10, 10 + 22 * i)
+    if estado.painel:                         # painel de métricas, à direita
+        filtro = estado.visiveis() if estado.filtro_ativo() else None
+        linhas = [" " + l + " " for l in
+                  metricas.linhas_painel(estado.arvore, estado.metricas, filtro)]
+        x = LARGURA - max(fonte.size(l)[0] for l in linhas) - 8     # alinhado à direita
+        topo = ALTURA - (170 if estado.selecionado is not None else 120)
+        for i, linha in enumerate(linhas):
+            desenhar_texto(fonte, linha, x, topo - 22 * i, tema["caixa"])
+    dica = fonte.render("H  ajuda", True, (20, 20, 20))
+    desenhar_texto(fonte, " H  ajuda ", LARGURA - dica.get_width() - 22, 10, (255, 210, 80),
+                   (20, 20, 20))
+    info = estado.info_selecao()
+    if info:                                  # painel do vaso selecionado, no topo
+        l1, l2 = info.split("\n")
+        desenhar_texto(fonte, " selecionado: " + l1 + " ", 10, ALTURA - 92, tema["caixa"])
+        desenhar_texto(fonte, " " + l2 + " ", 10, ALTURA - 114, tema["caixa"])
+        legenda = [("vaso", COR_SELECAO), ("caminho até a raiz", COR_CAMINHO),
+                   ("irrigado por ele", COR_SUBARVORE)]
+        x = 10
+        for texto, cor in legenda:            # quadradinhos coloridos da legenda
+            glColor3f(*cor)
+            glWindowPos2d(x, ALTURA - 133)
+            glDrawPixels(12, 12, GL_RGB, GL_UNSIGNED_BYTE,
+                         np.full((12, 12, 3), [int(255 * c) for c in cor], dtype=np.uint8))
+            desenhar_texto(fonte, texto, x + 16, ALTURA - 136)
+            x += 22 + fonte.size(texto)[0] + 14
+
+
+# -------------------------------------------------------------------- ajuda
+# (tecla, descrição) agrupados por tema; a tela é montada a partir desta lista
+AJUDA = [
+    ("Navegar", [
+        ("arrastar", "girar (solte em movimento)"), ("roda do mouse", "aproximar / afastar"),
+        ("1  2  3  4", "vistas predefinidas"),
+        ("P", "perspectiva / ortográfica"), ("setas, PgUp, PgDn", "mover a árvore"),
+        ("Z  X", "girar em torno de z"), (",  .", "diminuir / aumentar"),
+        ("R", "voltar ao início"), ("Tab", "giro automático"),
+    ]),
+    ("Ver a árvore funcionando", [
+        ("Espaço", "crescimento, geração por geração"), ("W", "fluxo de sangue"),
+        ("clique direito", "vaso, caminho e o que irriga"),
+        ("I + setas", "filtrar vasos por raio"), ("J", "painel de métricas"),
+    ]),
+    ("Aparência", [
+        ("E", "linhas / tubos / tubos sólidos"), ("C", "cor: raio / geração"),
+        ("5", "neblina"), ("6", "sombra no plano"),
+        ("7", "comparação lado a lado"),
+        ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
+        ("K", "componentes da luz"), ("L + setas", "mover a luz"),
+        ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
+        ("M", "antialiasing MSAA"),
+    ]),
+    ("Técnicas de visibilidade", [
+        ("B", "Back-Face Culling"), ("D", "Z-Buffer"), ("V", "ver o Z-Buffer"),
+        ("F", "faces de trás em vermelho"), ("N", "ordem dos transparentes"),
+    ]),
+    ("Outros", [
+        ("Y", "mini Ray Tracer"), ("S", "salvar imagem"), ("A", "eixos do mundo"),
+        ("Q", "tema escuro / claro"), ("H", "fechar esta ajuda"), ("ESC", "fechar a ajuda / sair"),
+    ]),
+]
+_fontes_ajuda = {}
+
+
+def desenhar_ajuda():
+    """Painel escuro semitransparente com os atalhos, em duas colunas."""
+    if not _fontes_ajuda:
+        _fontes_ajuda["titulo"] = pygame.font.Font(None, 34)
+        _fontes_ajuda["grupo"] = pygame.font.Font(None, 25)
+        _fontes_ajuda["grupo"].set_bold(True)
+        _fontes_ajuda["texto"] = pygame.font.Font(None, 22)
+    f_tit, f_grupo, f_txt = _fontes_ajuda["titulo"], _fontes_ajuda["grupo"], _fontes_ajuda["texto"]
+
+    # fundo: retângulo escuro com alfa 0,88 sobre a cena (composição alfa),
+    # centralizado na vertical com a altura do conteúdo
+    m, altura = 40, 660
+    topo, base = (ALTURA + altura) // 2, (ALTURA - altura) // 2
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, LARGURA, 0, ALTURA, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glColor4f(0.08, 0.14, 0.24, 0.88)
+    glBegin(GL_QUADS)
+    glVertex2f(m, base); glVertex2f(LARGURA - m, base)
+    glVertex2f(LARGURA - m, topo); glVertex2f(m, topo)
+    glEnd()
+
+    branco, cinza, amarelo = (255, 255, 255), (190, 205, 225), (255, 210, 80)
+    desenhar_texto(f_tit, "Atalhos", m + 24, topo - 44, cor=branco)
+    colunas = [AJUDA[:2] + AJUDA[4:], AJUDA[2:4]]
+    for c, grupos in enumerate(colunas):
+        x = m + 24 + c * (LARGURA - 2 * m) // 2
+        y = topo - 88
+        for nome, itens in grupos:
+            desenhar_texto(f_grupo, nome, x, y, cor=amarelo)
+            y -= 28
+            for tecla, descricao in itens:
+                desenhar_texto(f_txt, tecla, x, y, cor=branco)
+                desenhar_texto(f_txt, descricao, x + 150, y, cor=cinza)
+                y -= 23
+            y -= 14
 
 
 # -------------------------------------------------------------------- entrada
+def tratar_tecla_luz(estado, tecla):
+    """No modo luz, setas e PageUp/PageDown movem a fonte e + / - mudam a intensidade."""
+    passo = 0.2
+    movimentos = {pygame.K_LEFT: (-passo, 0, 0), pygame.K_RIGHT: (passo, 0, 0),
+                  pygame.K_UP: (0, passo, 0), pygame.K_DOWN: (0, -passo, 0),
+                  pygame.K_PAGEUP: (0, 0, passo), pygame.K_PAGEDOWN: (0, 0, -passo)}
+    if tecla in movimentos:
+        estado.luz = estado.luz + np.array(movimentos[tecla])
+        return True
+    if tecla in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+        estado.intensidade = min(estado.intensidade + 0.1, 2.0)
+        return True
+    if tecla in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        estado.intensidade = max(estado.intensidade - 0.1, 0.0)
+        return True
+    return False
+
+
+def tratar_tecla_intervalo(estado, tecla):
+    """No modo intervalo, esquerda/direita mudam o mínimo e baixo/cima o máximo."""
+    ajustes = {pygame.K_LEFT: (-1, 0), pygame.K_RIGHT: (1, 0),
+               pygame.K_DOWN: (0, -1), pygame.K_UP: (0, 1)}
+    if tecla in ajustes:
+        estado.ajustar_filtro(*ajustes[tecla])
+        return True
+    return False
+
+
 def tratar_tecla(estado, tecla):
     passo = 0.05
-    if tecla == pygame.K_e:
+    if estado.modo_luz and tratar_tecla_luz(estado, tecla):
+        return
+    if estado.modo_intervalo and tratar_tecla_intervalo(estado, tecla):
+        return
+    if tecla == pygame.K_g:
+        nomes = list(shaders.FONTES)
+        estado.sombreamento = nomes[(nomes.index(estado.sombreamento) + 1) % len(nomes)]
+    elif tecla == pygame.K_k:
+        estado.componentes = (estado.componentes + 1) % len(COMPONENTES)
+    elif tecla == pygame.K_l:
+        estado.modo_luz = not estado.modo_luz
+        estado.modo_intervalo = False
+    elif tecla == pygame.K_b:
+        estado.culling = (estado.culling + 1) % len(CULLING)
+    elif tecla == pygame.K_d:
+        estado.zbuffer = not estado.zbuffer
+    elif tecla == pygame.K_v:
+        estado.ver_profundidade = not estado.ver_profundidade
+    elif tecla == pygame.K_f:
+        estado.destacar_tras = not estado.destacar_tras
+    elif tecla == pygame.K_o:
+        estado.opacidade = (estado.opacidade + 1) % len(OPACIDADES)
+    elif tecla == pygame.K_n:
+        estado.ordem = (estado.ordem + 1) % len(ORDENS)
+    elif tecla == pygame.K_t:
+        estado.plano = not estado.plano
+    elif tecla == pygame.K_u:
+        estado.filtro = (estado.filtro + 1) % len(FILTROS)
+    elif tecla == pygame.K_i:
+        estado.modo_intervalo = not estado.modo_intervalo
+        estado.modo_luz = False
+    elif tecla == pygame.K_j:
+        estado.painel = not estado.painel
+    elif tecla == pygame.K_SPACE:
+        if estado.tau is not None:                  # só nos tubos
+            estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_7:
+        # desligado -> 1ª comparação -> ... -> última -> desligado
+        if estado.comparacao is None:
+            estado.comparacao = 0
+        elif estado.comparacao + 1 < len(COMPARACOES):
+            estado.comparacao += 1
+        else:
+            estado.comparacao = None
+    elif tecla == pygame.K_6:
+        estado.sombra = not estado.sombra
+    elif tecla == pygame.K_5:
+        estado.neblina = not estado.neblina
+    elif tecla == pygame.K_TAB:
+        estado.giro_auto = not estado.giro_auto
+    elif tecla == pygame.K_q:
+        trocar_tema()
+        estado.atualizar_cores()            # o cinza dos vasos apagados depende do tema
+    elif tecla == pygame.K_w:
+        estado.fluxo = not estado.fluxo
+        estado.atualizar_cores()
+    elif tecla == pygame.K_y:
+        # o ray tracer roda em outro processo, sem travar o visualizador
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
+    elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
     elif tecla == pygame.K_c:
@@ -370,7 +1324,12 @@ def inicializar_gl():
     glLineWidth(2.0)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    configurar_iluminacao()
+    programas.update(shaders.criar_programas())
+    criar_mapa_sombra()
+    global plano_ref
+    plano_ref = PlanoTexturizado()
+    print("OpenGL:", glGetString(GL_VERSION).decode(),
+          "| GLSL:", glGetString(GL_SHADING_LANGUAGE_VERSION).decode())
 
 
 def capturar(caminho):
@@ -394,7 +1353,7 @@ def nome_captura(estado):
 
 
 def main():
-    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree2D_Nterm064.vtk"
+    caminho = sys.argv[1] if len(sys.argv) > 1 else "data/tree3D_Nterm064.vtk"
     arvore = ler_vtk(caminho)
 
     pygame.display.init()             # só vídeo e fonte (evita iniciar o áudio)
@@ -406,35 +1365,57 @@ def main():
     inicializar_gl()
 
     estado = Estado(arvore)
+    estado.modo = 1 if arvore.eh_3d else 0          # TP2: modelos 3D abrem em tubos
     estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
     estado.reconstruir()
 
     relogio = pygame.time.Clock()
+    dt = 0.0
     rodando = True
     while rodando:
         salvar = False
+        estado.tempo = pygame.time.get_ticks() / 1000.0
         for evento in pygame.event.get():
+            if evento.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN, pygame.MOUSEWHEEL):
+                estado.interagiu()
             if evento.type == pygame.QUIT:
                 rodando = False
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
-                    rodando = False
+                    if estado.ajuda:
+                        estado.ajuda = False        # primeiro ESC só fecha a ajuda
+                    else:
+                        rodando = False
+                elif evento.key == pygame.K_h:
+                    estado.ajuda = not estado.ajuda
                 elif evento.key == pygame.K_s:
                     salvar = True
                 else:
                     tratar_tecla(estado, evento.key)
+            elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 3:
+                estado.selecionar(*evento.pos)
+            elif (evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1
+                  and estado.comparacao is not None
+                  and abs(evento.pos[0] - estado.divisoria * LARGURA) < 14):
+                estado.movendo_divisoria = True       # pegou a divisória
+            elif evento.type == pygame.MOUSEBUTTONUP and evento.button == 1:
+                estado.movendo_divisoria = False
             elif evento.type == pygame.MOUSEMOTION and evento.buttons[0]:
-                estado.ang_y += evento.rel[0] * 0.5
-                estado.ang_x += evento.rel[1] * 0.5
+                if estado.movendo_divisoria:
+                    estado.divisoria = float(np.clip(evento.pos[0] / LARGURA, 0.05, 0.95))
+                else:
+                    estado.arrastar(*evento.rel)
+                estado.interagiu()
             elif evento.type == pygame.MOUSEWHEEL:
                 fator = 0.9 if evento.y > 0 else 1 / 0.9
                 estado.dist = float(np.clip(estado.dist * fator, 0.5, 20.0))
 
+        estado.passo_movimento(dt, pygame.mouse.get_pressed()[0])
         desenhar_quadro(estado, fonte)
         if salvar:
             capturar(nome_captura(estado))
         pygame.display.flip()
-        relogio.tick(60)
+        dt = relogio.tick(60) / 1000.0          # segundos desde o quadro anterior
 
     pygame.quit()
 
