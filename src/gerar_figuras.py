@@ -39,6 +39,8 @@ def novo_estado(arquivo, **ajustes):
     estado.eixos = False
     estado.painel = False                    # painel de métricas só nas figuras do Módulo 8
     estado.neblina = False                   # figuras do TP2 sem os acabamentos do portfólio
+    estado.sombra = False
+    estado.luz = np.array([1.2, 1.6, 2.0])  # posição da luz usada no TP2
     for chave, valor in ajustes.items():
         setattr(estado, chave, valor)
     estado.reconstruir()

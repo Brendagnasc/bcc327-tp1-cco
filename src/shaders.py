@@ -221,15 +221,18 @@ layout(location = 1) in vec2 a_uv;          // coordenadas de textura do vértic
 uniform mat4 u_projecao;
 uniform mat4 u_modelview;
 uniform mat3 u_normal;
+uniform mat4 u_luz_matriz;     // mundo -> recorte da LUZ (para a sombra)
 out vec3 v_pos;
 out vec3 v_normal;
 out vec2 v_uv;
+out vec4 v_luz;
 void main() {
     vec4 pos = u_modelview * vec4(a_posicao, 1.0);
     gl_Position = u_projecao * pos;
     v_pos = pos.xyz;
     v_normal = u_normal * vec3(0.0, 1.0, 0.0);   // o plano é horizontal
     v_uv = a_uv;
+    v_luz = u_luz_matriz * vec4(a_posicao, 1.0); // o plano já está no mundo
 }
 """
 
@@ -241,7 +244,27 @@ in vec2 v_uv;                  // interpolada para este pixel
 out vec4 f_cor;
 uniform sampler2D u_textura;
 uniform int u_modo;            // 0 NEAREST, 1 bilinear OpenGL, 2 bilinear própria, 3 (u, v)
+in vec4 v_luz;
+uniform sampler2D u_mapa_sombra;
+uniform float u_usar_sombra;
 """ + ILUMINACAO + NEBLINA + """
+// Shadow mapping: o ponto do plano é levado ao espaço da luz; se o mapa de
+// profundidade guarda algo MAIS PERTO da luz naquela direção, há um vaso no
+// caminho e o ponto está na sombra. PCF: a comparação é feita em 5 x 5
+// texels vizinhos e a média dá uma borda de sombra suave.
+float fator_sombra() {
+    if (u_usar_sombra < 0.5) return 0.0;
+    vec3 p = v_luz.xyz / v_luz.w * 0.5 + 0.5;       // NDC [-1,1] -> [0,1]
+    if (p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
+        return 0.0;                                  // fora do alcance da luz
+    vec2 texel = 1.0 / vec2(textureSize(u_mapa_sombra, 0));
+    float s = 0.0;
+    for (int x = -2; x <= 2; x++)
+        for (int y = -2; y <= 2; y++)
+            s += (p.z - 0.002 > texture(u_mapa_sombra, p.xy + vec2(x, y) * texel).r) ? 1.0 : 0.0;
+    return s / 25.0;
+}
+
 // Filtragem bilinear feita por nós: lê os 4 texels vizinhos com texelFetch
 // (que NÃO filtra) e interpola. Centros dos texels em (i + 0,5) / n.
 vec3 bilinear_propria(vec2 uv) {
@@ -263,7 +286,35 @@ void main() {
         return;
     }
     vec3 cor = (u_modo == 2) ? bilinear_propria(v_uv) : texture(u_textura, v_uv).rgb;
-    f_cor = vec4(aplicar_neblina(iluminar(v_normal, v_pos, cor), v_pos), 1.0);
+    vec3 iluminada = iluminar(v_normal, v_pos, cor) * (1.0 - 0.6 * fator_sombra());
+    f_cor = vec4(aplicar_neblina(iluminada, v_pos), 1.0);
+}
+"""
+
+
+# ---------------------------------------------------------------- Sombra
+# Passada de profundidade vista da luz: só a posição importa. O fragment
+# shader não escreve cor; o OpenGL grava a profundidade no mapa de sombra.
+# Partes que ainda não "cresceram" (animação) também não fazem sombra.
+SOMBRA_VERT = """
+#version 330 core
+layout(location = 0) in vec3 a_posicao;
+layout(location = 4) in float a_ordem;
+uniform mat4 u_mvp;            // P_luz . V_luz . M
+out float v_ordem;
+void main() {
+    gl_Position = u_mvp * vec4(a_posicao, 1.0);
+    v_ordem = a_ordem;
+}
+"""
+
+SOMBRA_FRAG = """
+#version 330 core
+in float v_ordem;
+uniform float u_crescendo;
+uniform float u_nivel;
+void main() {
+    if (u_crescendo > 0.5 && v_ordem > u_nivel) discard;
 }
 """
 
@@ -326,6 +377,7 @@ def criar_programas():
     """Compila os três modelos de sombreamento (chamar com contexto OpenGL ativo)."""
     programas = {nome: Programa(v, f) for nome, (v, f) in FONTES.items()}
     programas["Textura"] = Programa(TEXTURA_VERT, TEXTURA_FRAG)
+    programas["Sombra"] = Programa(SOMBRA_VERT, SOMBRA_FRAG)
     return programas
 
 

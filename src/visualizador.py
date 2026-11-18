@@ -2,8 +2,9 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 7: neblina pela profundidade, fundo em gradiente e cor por
-geração; inércia e giro automático, tema escuro (Q), ajuda (H), crescimento, fluxo de
+Versão portfólio 8: sombra da árvore no plano (shadow mapping), neblina,
+fundo em gradiente e cor por geração; inércia e giro automático, tema escuro (Q),
+ajuda (H), crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
 irrigada. Mantém tudo do TP2.
 
@@ -48,6 +49,7 @@ Teclas e mouse:
     H                      mostra / esconde a tela de ajuda com todos os atalhos
     Q                      tema escuro / claro
     5                      liga / desliga a neblina pela profundidade
+    6                      liga / desliga a sombra da árvore no plano
     Tab                    liga / desliga o giro automático (começa após alguns
                            segundos sem nenhuma interação)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
@@ -118,7 +120,9 @@ MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
 MAPAS = ["jet", "viridis", "geração"]
 ESQUEMAS = {"jet": ("raio", "jet"), "viridis": ("raio", "viridis"), "geração": ("geração", "plasma")}
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
-LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
+LUZ_PADRAO = (0.8, 2.6, 1.4)   # posição inicial da luz pontual (espaço do mundo):
+                               # mais alta que no TP2, para a sombra cair sobre o plano
+TAM_SOMBRA = 2048              # resolução do mapa de sombra (texels por lado)
 PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
 CULLING = ["desligado", "OpenGL", "próprio (N·V)"]
 OPACIDADES = [1.0, 0.6, 0.3]
@@ -174,6 +178,7 @@ class Estado:
         self.tempo = 0.0
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
         self.neblina = True
+        self.sombra = True
         self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
         self.arraste = np.zeros(2)      # rotação arrastada desde o último quadro
         self.giro_auto = True
@@ -658,6 +663,89 @@ def enviar_luz(prog, estado):
 plano_ref = None            # criado em inicializar_gl()
 
 
+# -------------------------------------------------------------------- sombra
+mapa_sombra = {}            # FBO e textura de profundidade, criados em inicializar_gl()
+
+
+def criar_mapa_sombra():
+    """Framebuffer só com profundidade: o 'filme' de uma câmera posta na luz."""
+    tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, tex)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, TAM_SOMBRA, TAM_SOMBRA, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, None)
+    for parametro in (GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER):
+        glTexParameteri(GL_TEXTURE_2D, parametro, GL_NEAREST)
+    for parametro in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T):
+        glTexParameteri(GL_TEXTURE_2D, parametro, GL_CLAMP_TO_EDGE)
+    fbo = glGenFramebuffers(1)
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0)
+    glDrawBuffer(GL_NONE)                       # nenhuma cor: só profundidade
+    glReadBuffer(GL_NONE)
+    completo = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    if completo:
+        mapa_sombra.update(fbo=fbo, tex=tex)
+
+
+def matriz_luz(estado):
+    """P_luz . V_luz: uma câmera perspectiva posta na luz, olhando para o
+    centro da árvore, com abertura justa para enquadrar a árvore inteira
+    (quanto mais justa, mais texels do mapa caem sobre a árvore)."""
+    centro = np.array([estado.tx, estado.ty, estado.tz])
+    para_luz = estado.luz - centro
+    d = float(np.linalg.norm(para_luz))
+    cima = (0, 0, 1) if abs(para_luz[1]) > 0.99 * d else (0, 1, 0)
+    raio = 1.25 * estado.s                      # raio da esfera que contém a árvore
+    abertura = 2 * np.degrees(np.arctan(raio / max(d, raio * 1.05)))
+    V = T.olhar_para(estado.luz, centro, cima)
+    P = T.perspectiva(abertura, 1.0, max(d - 2 * raio, 0.05), d + 2 * raio)
+    return P @ V
+
+
+def usar_sombra(estado):
+    return (estado.sombra and estado.plano and estado.tau is not None
+            and "fbo" in mapa_sombra)
+
+
+def passada_sombra(estado):
+    """1ª passada: desenha a árvore vista da luz e guarda só a profundidade."""
+    if not usar_sombra(estado):
+        return
+    glBindFramebuffer(GL_FRAMEBUFFER, mapa_sombra["fbo"])
+    glViewport(0, 0, TAM_SOMBRA, TAM_SOMBRA)
+    glClear(GL_DEPTH_BUFFER_BIT)
+    glEnable(GL_DEPTH_TEST)
+    glDepthFunc(GL_LESS)
+
+    prog = programas["Sombra"]
+    prog.usar()
+    prog.mat4("u_mvp", matriz_luz(estado) @ estado.matriz_modelo())
+    nivel = estado.nivel_crescimento()
+    prog.float("u_crescendo", 1.0 if nivel is not None else 0.0)
+    prog.float("u_nivel", nivel if nivel is not None else 0.0)
+    for local, vbo, comp in ((0, estado.vbos[0], 3), (4, estado.vbos[5], 1)):
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glEnableVertexAttribArray(local)
+        glVertexAttribPointer(local, comp, GL_FLOAT, GL_FALSE, 0, None)
+    if estado.filtro_ativo():                   # vasos escondidos pelo filtro não fazem sombra
+        tris = np.nonzero(estado.visiveis()[estado.seg_id[::3]])[0]
+        indices = (tris[:, None] * 3 + np.arange(3)).astype(np.uint32).ravel()
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, estado.ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STREAM_DRAW)
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+    else:
+        glDrawArrays(GL_TRIANGLES, 0, len(estado.vertices))
+    for local in (0, 4):
+        glDisableVertexAttribArray(local)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glUseProgram(0)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    glViewport(0, 0, LARGURA, ALTURA)
+
+
 def desenhar_plano(estado):
     """Plano de referência texturizado. Fica no espaço do MUNDO (usa só V),
     como um piso: não acompanha as transformações do modelo."""
@@ -671,8 +759,19 @@ def desenhar_plano(estado):
     enviar_neblina(prog, estado)
     prog.int("u_textura", 0)                    # unidade de textura 0
     prog.int("u_modo", estado.filtro)
+    sombra = usar_sombra(estado)
+    prog.float("u_usar_sombra", 1.0 if sombra else 0.0)
+    prog.int("u_mapa_sombra", 1)                # unidade de textura 1
+    prog.mat4("u_luz_matriz", matriz_luz(estado) if sombra else np.identity(4))
+    if sombra:
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, mapa_sombra["tex"])
+        glActiveTexture(GL_TEXTURE0)
     filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
     plano_ref.desenhar(filtro_gl, escuro=tema is TEMAS["escuro"])
+    glActiveTexture(GL_TEXTURE1)
+    glBindTexture(GL_TEXTURE_2D, 0)
+    glActiveTexture(GL_TEXTURE0)
     glUseProgram(0)
 
 
@@ -847,6 +946,7 @@ def trocar_tema(nome=None):
 
 
 def desenhar_quadro(estado, fonte):
+    passada_sombra(estado)                     # antes de tudo: o mapa de sombra
     glClearColor(*tema["fundo"], 1.0)
     # o Z-Buffer é lido da janela; o FBO multiamostrado não pode ser lido direto
     usar_msaa = estado.msaa and estado.fbo_msaa is not None and not estado.ver_profundidade
@@ -938,7 +1038,7 @@ AJUDA = [
     ]),
     ("Aparência", [
         ("E", "linhas / tubos / tubos sólidos"), ("C", "cor: raio / geração"),
-        ("5", "neblina"),
+        ("5", "neblina"), ("6", "sombra no plano"),
         ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
         ("K", "componentes da luz"), ("L + setas", "mover a luz"),
         ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
@@ -1062,6 +1162,8 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_6:
+        estado.sombra = not estado.sombra
     elif tecla == pygame.K_5:
         estado.neblina = not estado.neblina
     elif tecla == pygame.K_TAB:
@@ -1126,6 +1228,7 @@ def inicializar_gl():
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     programas.update(shaders.criar_programas())
+    criar_mapa_sombra()
     global plano_ref
     plano_ref = PlanoTexturizado()
     print("OpenGL:", glGetString(GL_VERSION).decode(),
