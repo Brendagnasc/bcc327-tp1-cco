@@ -126,6 +126,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `Tab` | Liga/desliga o giro automático (começa após 6 s sem interação) |
 | `5` | Liga/desliga a neblina pela profundidade |
 | `6` | Liga/desliga a sombra da árvore no plano (shadow mapping) |
+| `8` ou botão **Menu** | Painel de controles com botões e sliders (tudo pelo mouse) |
 | `7` | Comparação lado a lado (Flat x Phong, Gouraud x Phong, NEAREST x bilinear, neblina, sombra, opacidade); arraste a linha amarela para mover a divisória |
 
 ### Mini Ray Tracer
@@ -140,7 +141,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 
 Segue o roteiro de integração do enunciado:
 
-Dentro do programa, `H` mostra todos os atalhos.
+Dentro do programa, o botão **Menu** (canto superior esquerdo) abre um painel com botões e sliders para tudo, sem precisar de teclado, e `H` mostra todos os atalhos.
 
 1. **Carregar uma árvore:** `python src/visualizador.py data/tree3D_Nterm128.vtk`.
 2. **Navegar:** arrastar, roda do mouse, vistas `1` a `4`.
@@ -169,6 +170,7 @@ Dentro do programa, `H` mostra todos os atalhos.
 | Ray Casting: raio pela inversa de P · V, interseção raio-cilindro e raio-esfera | `raycasting.py` |
 | Mini Ray Tracer: raios primários, de sombra e refletidos, interseções e sombreamento | `raytracer.py` |
 | Métricas da árvore (grafo, BFS, gerações, comprimento, volume, bifurcações) e filtro por raio | `metricas.py`, `visualizador.py` |
+| Painel de controles (botões, seletores e sliders em modo imediato) | `painel.py` |
 
 ### Realizado com auxílio de bibliotecas
 
