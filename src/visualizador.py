@@ -2,8 +2,8 @@
 visualizador.py
 
 Visualizador principal da árvore CCO (pygame-ce + PyOpenGL).
-Versão portfólio 6: inércia ao soltar o mouse e giro automático quando
-ninguém está mexendo, tema escuro (Q), tela de ajuda (H), crescimento, fluxo de
+Versão portfólio 7: neblina pela profundidade, fundo em gradiente e cor por
+geração; inércia e giro automático, tema escuro (Q), ajuda (H), crescimento, fluxo de
 sangue animado e clique que acende o caminho até a raiz e a subárvore
 irrigada. Mantém tudo do TP2.
 
@@ -47,10 +47,11 @@ Teclas e mouse:
     Espaço                 anima o crescimento da árvore, geração por geração
     H                      mostra / esconde a tela de ajuda com todos os atalhos
     Q                      tema escuro / claro
+    5                      liga / desliga a neblina pela profundidade
     Tab                    liga / desliga o giro automático (começa após alguns
                            segundos sem nenhuma interação)
     E                      modo: linhas + cor / espessura + cor / espessura sólida
-    C                      mapa de cores (jet / viridis)
+    C                      cor dos vasos: raio (jet) / raio (viridis) / geração
     + -                    exagero da espessura
     ESC                    sai
 """
@@ -83,11 +84,18 @@ LARGURA, ALTURA = 900, 900
 # Temas de cor: fundo da cena, texto, caixas de texto e marcador de impacto
 TEMAS = {
     "escuro": {"fundo": (0.07, 0.08, 0.11), "texto": (225, 230, 240),
+               "fundo_alto": (0.15, 0.19, 0.27), "fundo_baixo": (0.03, 0.035, 0.05),
                "caixa": (32, 38, 52), "impacto": (1.0, 1.0, 1.0),
                "apagado": (0.30, 0.32, 0.38)},
-    "claro": {"fundo": (1.0, 1.0, 1.0), "texto": (20, 20, 20),
+    "claro": {"fundo": (0.96, 0.97, 0.99), "texto": (20, 20, 20),
+              "fundo_alto": (0.82, 0.87, 0.94), "fundo_baixo": (1.0, 1.0, 1.0),
               "caixa": (245, 247, 250), "impacto": (0.0, 0.0, 0.0),
               "apagado": (0.78, 0.79, 0.82)},
+    # fundo branco liso: só para as figuras do relatório (não entra no ciclo da tecla Q)
+    "branco": {"fundo": (1.0, 1.0, 1.0), "texto": (20, 20, 20),
+               "fundo_alto": (1.0, 1.0, 1.0), "fundo_baixo": (1.0, 1.0, 1.0),
+               "caixa": (245, 247, 250), "impacto": (0.0, 0.0, 0.0),
+               "apagado": (0.78, 0.79, 0.82)},
 }
 tema = TEMAS["escuro"]         # tema atual (a tecla Q alterna)
 FUNDO = tema["fundo"]
@@ -106,7 +114,9 @@ FREQUENCIA = 1.2                  # batimentos por segundo (72 bpm)
 DURACAO_CRESCIMENTO = 7.0         # segundos para a árvore crescer da raiz às pontas
 DURACAO_ARVORE = 2.0              # segundos para o pulso ir da raiz ao terminal mais distante
 MODOS = ["linhas + cor", "espessura + cor", "espessura sólida"]
-MAPAS = ["jet", "viridis"]
+# Esquemas de cor dos vasos (tecla C): (grandeza, mapa de cores)
+MAPAS = ["jet", "viridis", "geração"]
+ESQUEMAS = {"jet": ("raio", "jet"), "viridis": ("raio", "viridis"), "geração": ("geração", "plasma")}
 MM_PARA_M = 1e-3   # raio vem em mm; coordenadas em m
 LUZ_PADRAO = (1.2, 1.6, 2.0)   # posição inicial da luz pontual (espaço do mundo)
 PERTO, LONGE = 0.01, 100.0     # planos near e far das projeções
@@ -163,6 +173,7 @@ class Estado:
         self.inicio_crescimento = None  # instante em que a animação começou (None = parada)
         self.tempo = 0.0
         self.hud = True                 # False: imagem limpa, sem textos (vídeos e GIFs)
+        self.neblina = True
         self.vel = np.zeros(2)          # velocidade angular (graus/s) em y e x: inércia
         self.arraste = np.zeros(2)      # rotação arrastada desde o último quadro
         self.giro_auto = True
@@ -191,6 +202,16 @@ class Estado:
         self.perspectiva = True
         if hasattr(self, "vel"):
             self.vel[:] = 0.0
+
+    # ---------------------------------------------------------------- cor
+    def escala_cor(self):
+        """Grandeza que colore os vasos: (valores, mín, máx, mapa, rótulo, formato)."""
+        grandeza, mapa = ESQUEMAS[MAPAS[self.mapa]]
+        if grandeza == "geração":
+            g = self.metricas["geracao"]
+            return g, 0, int(g.max()), mapa, "geração", "{:.0f}"
+        r = self.arvore.raios
+        return r, float(r.min()), float(r.max()), mapa, "raio (mm)", "{:.3f}"
 
     # ---------------------------------------------------------------- movimento
     def arrastar(self, dx, dy):
@@ -261,8 +282,8 @@ class Estado:
     # ---------------------------------------------------------------- geometria
     def reconstruir(self):
         arv = self.arvore
-        cores_seg = mapear_cores(arv.raios, arv.raios.min(), arv.raios.max(),
-                                 MAPAS[self.mapa])
+        valores, vmin, vmax, nome_mapa, _, _ = self.escala_cor()
+        cores_seg = mapear_cores(valores, vmin, vmax, nome_mapa)
         if self.modo == 2:
             cores_seg = np.tile(VERMELHO, (arv.n_segmentos, 1))
 
@@ -501,6 +522,7 @@ def desenhar_com_shader(estado, modelview):
     prog.mat3("u_normal", shaders.matriz_normal(modelview))
 
     enviar_luz(prog, estado)
+    enviar_neblina(prog, estado)
 
     # VBOs -> atributos (location 0, 1, 2). No Flat, o atributo de normal
     # recebe as normais de FACE em vez das normais dos vértices.
@@ -606,6 +628,19 @@ def ordenar_tras_para_frente(estado, modelview, tris):
     return tris[np.argsort(z, kind="stable")]
 
 
+def enviar_neblina(prog, estado):
+    """A neblina vai do ponto mais próximo ao mais distante da árvore: o centro
+    do modelo está em (tx, ty, tz) no mundo e o modelo normalizado tem raio ~s."""
+    centro = estado.matriz_visao() @ np.array([estado.tx, estado.ty, estado.tz, 1.0])
+    distancia = -centro[2]
+    prog.float("u_neblina", 1.0 if estado.neblina else 0.0)
+    prog.float("u_neb_perto", distancia - 0.7 * estado.s)
+    prog.float("u_neb_longe", distancia + 0.9 * estado.s)
+    prog.vec3("u_fundo_baixo", tema["fundo_baixo"])
+    prog.vec3("u_fundo_alto", tema["fundo_alto"])
+    prog.float("u_altura_tela", ALTURA)
+
+
 def enviar_luz(prog, estado):
     """Uniforms da iluminação, comuns aos vasos e ao plano."""
     # a luz está no mundo; o shader trabalha no espaço da câmera: aplica V
@@ -633,6 +668,7 @@ def desenhar_plano(estado):
     prog.mat4("u_modelview", visao)
     prog.mat3("u_normal", shaders.matriz_normal(visao))
     enviar_luz(prog, estado)
+    enviar_neblina(prog, estado)
     prog.int("u_textura", 0)                    # unidade de textura 0
     prog.int("u_modo", estado.filtro)
     filtro_gl = GL_NEAREST if FILTROS[estado.filtro] == "NEAREST" else GL_LINEAR
@@ -694,8 +730,9 @@ def desenhar_barra_cores(estado, fonte):
     arv = estado.arvore
     x0, x1, y0, y1 = LARGURA * 0.3, LARGURA * 0.7, ALTURA - 60, ALTURA - 40
     passos = 64
-    valores = np.linspace(arv.raios.min(), arv.raios.max(), passos + 1)
-    cores = mapear_cores(valores, valores[0], valores[-1], MAPAS[estado.mapa])
+    _, vmin, vmax, nome_mapa, rotulo, formato = estado.escala_cor()
+    valores = np.linspace(vmin, vmax, passos + 1)
+    cores = mapear_cores(valores, vmin, vmax, nome_mapa)
     xs = np.linspace(x0, x1, passos + 1)
 
     glMatrixMode(GL_PROJECTION)
@@ -710,8 +747,8 @@ def desenhar_barra_cores(estado, fonte):
         glVertex2f(x, y1)
     glEnd()
 
-    if estado.filtro_ativo() or estado.modo_intervalo:
-        # véu branco sobre a parte da escala que está fora do filtro
+    if (estado.filtro_ativo() or estado.modo_intervalo) and rotulo.startswith("raio"):
+        # véu sobre a parte da escala que está fora do filtro (o filtro é por raio)
         rmin, rmax = arv.raios.min(), arv.raios.max()
         xa = x0 + (estado.filtro_min - rmin) / (rmax - rmin) * (x1 - x0)
         xb = x0 + (estado.filtro_max - rmin) / (rmax - rmin) * (x1 - x0)
@@ -727,9 +764,10 @@ def desenhar_barra_cores(estado, fonte):
             glVertex2f(x, y0 - 5); glVertex2f(x, y1 + 5)
         glEnd()
 
-    desenhar_texto(fonte, f"{arv.raios.min():.3f}", x0 - 55, y0 + 2)
-    desenhar_texto(fonte, f"{arv.raios.max():.3f}", x1 + 8, y0 + 2)
-    desenhar_texto(fonte, "raio (mm)", LARGURA / 2 - 35, y1 + 6)
+    texto_min, texto_max = formato.format(vmin), formato.format(vmax)
+    desenhar_texto(fonte, texto_min, x0 - 8 - fonte.size(texto_min)[0], y0 + 2)
+    desenhar_texto(fonte, texto_max, x1 + 8, y0 + 2)
+    desenhar_texto(fonte, rotulo, LARGURA / 2 - fonte.size(rotulo)[0] / 2, y1 + 6)
 
 
 def criar_fbo_msaa(amostras=4):
@@ -786,6 +824,20 @@ def mostrar_profundidade(estado):
     glDrawPixels(LARGURA, ALTURA, GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(img))
 
 
+def desenhar_fundo():
+    """Fundo em gradiente vertical: um retângulo do tamanho da tela com uma cor
+    em cima e outra embaixo; o rasterizador interpola entre elas."""
+    glDisable(GL_DEPTH_TEST)
+    glMatrixMode(GL_PROJECTION)
+    glLoadMatrixf(T.para_opengl(T.ortografica(0, 1, 0, 1, -1, 1)))
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    glBegin(GL_QUADS)
+    glColor3f(*tema["fundo_baixo"]); glVertex2f(0, 0); glVertex2f(1, 0)
+    glColor3f(*tema["fundo_alto"]);  glVertex2f(1, 1); glVertex2f(0, 1)
+    glEnd()
+
+
 def trocar_tema(nome=None):
     """Alterna (ou escolhe) o tema de cores da interface e da cena."""
     global tema
@@ -801,6 +853,7 @@ def desenhar_quadro(estado, fonte):
     if usar_msaa:                              # desenha a cena no FBO multiamostrado
         glBindFramebuffer(GL_FRAMEBUFFER, estado.fbo_msaa)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    desenhar_fundo()
 
     # Z-Buffer: cada fragmento só é escrito se estiver mais perto que o já gravado
     if estado.zbuffer:
@@ -884,7 +937,8 @@ AJUDA = [
         ("I + setas", "filtrar vasos por raio"), ("J", "painel de métricas"),
     ]),
     ("Aparência", [
-        ("E", "linhas / tubos / tubos sólidos"), ("C", "mapa de cores"),
+        ("E", "linhas / tubos / tubos sólidos"), ("C", "cor: raio / geração"),
+        ("5", "neblina"),
         ("+  -", "espessura dos vasos"), ("G", "Flat / Gouraud / Phong"),
         ("K", "componentes da luz"), ("L + setas", "mover a luz"),
         ("O", "transparência"), ("T  U", "plano com textura / filtragem"),
@@ -1008,6 +1062,8 @@ def tratar_tecla(estado, tecla):
     elif tecla == pygame.K_SPACE:
         if estado.tau is not None:                  # só nos tubos
             estado.inicio_crescimento = estado.tempo
+    elif tecla == pygame.K_5:
+        estado.neblina = not estado.neblina
     elif tecla == pygame.K_TAB:
         estado.giro_auto = not estado.giro_auto
     elif tecla == pygame.K_q:
