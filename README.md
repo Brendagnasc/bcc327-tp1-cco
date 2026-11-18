@@ -94,7 +94,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `A` | Eixos do mundo |
 | `R` | Restaura transformações, vista e luz |
 | `E` | Linhas / tubos coloridos / tubos sólidos |
-| `C` | Mapa de cores jet / viridis |
+| `C` | Cor dos vasos: raio (jet) / raio (viridis) / geração |
 | `+` / `-` | Exagero da espessura |
 | `M` | MSAA 4x |
 | `S` | Salva a tela em `report/figures/` |
@@ -124,6 +124,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `H` | Tela de ajuda com todos os atalhos (`ESC` fecha) |
 | `Q` | Tema escuro (padrão) / claro |
 | `Tab` | Liga/desliga o giro automático (começa após 6 s sem interação) |
+| `5` | Liga/desliga a neblina pela profundidade |
 
 ### Mini Ray Tracer
 

@@ -38,6 +38,7 @@ def novo_estado(arquivo, **ajustes):
     estado.modo = 1 if estado.arvore.eh_3d else 0
     estado.eixos = False
     estado.painel = False                    # painel de métricas só nas figuras do Módulo 8
+    estado.neblina = False                   # figuras do TP2 sem os acabamentos do portfólio
     for chave, valor in ajustes.items():
         setattr(estado, chave, valor)
     estado.reconstruir()
@@ -141,7 +142,7 @@ if __name__ == "__main__":
     pygame.display.set_caption("Gerando figuras...")
     fonte = pygame.font.Font(None, 24)
     vis.inicializar_gl()
-    vis.trocar_tema("claro")              # figuras do relatório no tema claro
+    vis.trocar_tema("branco")             # figuras do relatório com fundo branco liso
     figuras_visualizador()
     figuras_raytracer()
     pygame.display.quit()
