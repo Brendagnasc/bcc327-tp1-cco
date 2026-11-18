@@ -126,6 +126,7 @@ python src/gravar_demo.py                    # regrava demo/demo.gif e demo/demo
 | `Tab` | Liga/desliga o giro automático (começa após 6 s sem interação) |
 | `5` | Liga/desliga a neblina pela profundidade |
 | `6` | Liga/desliga a sombra da árvore no plano (shadow mapping) |
+| `7` | Comparação lado a lado (Flat x Phong, Gouraud x Phong, NEAREST x bilinear, neblina, sombra, opacidade); arraste a linha amarela para mover a divisória |
 
 ### Mini Ray Tracer
 
