@@ -930,9 +930,32 @@ def criar_fbo_msaa(amostras=4):
         completo = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glBindRenderbuffer(GL_RENDERBUFFER, 0)
+        criar_fbo_msaa.buffers = (fbo, cor, prof)     # para apagar ao redimensionar
         return (fbo, amostras) if completo else (None, 0)
     except Exception:
         return None, 0
+
+
+def redimensionar(estado, largura, altura):
+    """A janela mudou de tamanho (maximizar, arrastar a borda).
+
+    O OpenGL não acompanha a janela sozinho: o glViewport diz em que
+    retângulo da janela a imagem é desenhada, e o FBO multiamostrado tem
+    tamanho fixo. Por isso os dois são refeitos com o novo tamanho. A
+    projeção, o Ray Casting e os textos já leem LARGURA e ALTURA a cada
+    quadro, então se ajustam sozinhos.
+    """
+    global LARGURA, ALTURA
+    LARGURA, ALTURA = max(largura, 300), max(altura, 300)
+    glViewport(0, 0, LARGURA, ALTURA)
+    buffers = getattr(criar_fbo_msaa, "buffers", None)
+    if buffers is not None:                    # libera o FBO antigo antes de criar outro
+        glDeleteFramebuffers(1, [buffers[0]])
+        glDeleteRenderbuffers(2, list(buffers[1:]))
+        criar_fbo_msaa.buffers = None
+    estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
+    if painel_ui is not None:
+        painel_ui.W, painel_ui.H = LARGURA, ALTURA
 
 
 def mostrar_profundidade(estado):
@@ -1471,7 +1494,8 @@ def main():
 
     pygame.display.init()             # só vídeo e fonte (evita iniciar o áudio)
     pygame.font.init()
-    pygame.display.set_mode((LARGURA, ALTURA), pygame.OPENGL | pygame.DOUBLEBUF)
+    pygame.display.set_mode((LARGURA, ALTURA),
+                            pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE)
     pygame.display.set_caption(f"TP1 CCO - {arvore.nome}")
     fonte = pygame.font.Font(None, 24)
 
@@ -1497,6 +1521,8 @@ def main():
                 estado.interagiu()
             if evento.type == pygame.QUIT:
                 rodando = False
+            elif evento.type == pygame.WINDOWSIZECHANGED:   # maximizar, arrastar a borda
+                redimensionar(estado, evento.x, evento.y)
             elif evento.type == pygame.KEYDOWN:
                 if evento.key == pygame.K_ESCAPE:
                     if estado.ajuda:
