@@ -3,7 +3,7 @@ gravar_demo.py
 
 Grava a demonstração curta que aparece no topo do README (demo/demo.gif e
 demo/demo.mp4): crescimento da árvore, fluxo de sangue, clique num vaso,
-transparência, filtro por raio e o mini Ray Tracer.
+transparência, filtro por raio e o Ray Tracing da árvore.
 
 Cada cena é uma função que ajusta o Estado do visualizador quadro a quadro;
 os quadros são capturados com glReadPixels, recebem uma legenda (Pillow) e
@@ -30,8 +30,11 @@ import pygame
 from OpenGL.GL import *
 from PIL import Image, ImageDraw, ImageFont
 
+import json
+import types
+
 import metricas
-import raytracer
+import raytracer_arvore
 import visualizador as vis
 from leitor_vtk import ler_vtk
 
@@ -197,15 +200,23 @@ def main():
             f"raio ≥ {e.filtro_min:.2f} mm: {int(e.visiveis().sum())} de {n_vasos} vasos"
         ).replace(".", ","), ajuste=filtrar)
 
-        # 6. mini Ray Tracer (imagem estática, com zoom lento)
-        img, _ = raytracer.renderizar(3, 800, 600)
+        # 6. Ray Tracer da árvore, na mesma vista do último quadro, com zoom lento
+        estado.filtro_min = rmin
+        campos = ["modo", "mapa", "vista", "dist", "ang_x", "ang_y", "ang_z",
+                  "tx", "ty", "tz", "s", "exagero", "perspectiva"]
+        vista = {c: getattr(estado, c) for c in campos}
+        vista["luz"] = [float(x) for x in estado.luz]
+        args = types.SimpleNamespace(modelo=MODELO, largura=LADO, rapido=False, ssaa=1,
+                                     vista=json.dumps(vista, default=float), tema="escuro")
+        img, _, segundos, _, _ = raytracer_arvore.renderizar(args)
+        print(f"ray tracing: {segundos:.1f} s")
         rt = Image.fromarray(img)
-        for i in range(int(2.5 * FPS)):
-            z = 1.0 + 0.08 * i / (2.5 * FPS)
-            w, h = 600 / z, 600 / z
-            corte = rt.crop((400 - w / 2, 300 - h / 2, 400 + w / 2, 300 + h / 2))
-            g.salvar(legendar(corte, "Mini Ray Tracer",
-                              "raios primários, de sombra e refletidos"))
+        for i in range(int(3.0 * FPS)):
+            z = 1.0 + 0.10 * i / (3.0 * FPS)
+            w = LADO / z
+            corte = rt.crop(((LADO - w) / 2, (LADO - w) / 2, (LADO + w) / 2, (LADO + w) / 2))
+            g.salvar(legendar(corte, "Ray Tracing da árvore",
+                              "sombras entre os vasos e reflexo no piso"))
 
         pygame.display.quit()
         print(f"{g.n} quadros ({g.n / FPS:.1f} s)")
@@ -216,7 +227,7 @@ def main():
                         "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
                         str(SAIDA / "demo.mp4")], check=True)
         # GIF: paleta de 128 cores calculada para o vídeo inteiro (melhor qualidade)
-        filtro = ("fps=10,scale=380:-1:flags=lanczos,split[a][b];"
+        filtro = ("fps=9,scale=380:-1:flags=lanczos,split[a][b];"
                   "[a]palettegen=max_colors=96:stats_mode=diff[p];"
                   "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle")
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *entrada, "-vf", filtro,
