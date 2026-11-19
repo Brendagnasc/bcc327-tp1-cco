@@ -42,7 +42,8 @@ Teclas e mouse:
     N                      ordem dos transparentes: Painter's (trás -> frente) / sem ordenação
     T                      mostra / esconde o plano de referência com textura
     U                      filtragem: NEAREST / bilinear (OpenGL) / bilinear (própria) / (u, v)
-    Y                      abre o mini Ray Tracer (raytracer.py) em outra janela
+    Y                      abre o Ray Tracer da árvore (raytracer_arvore.py) em outra
+                           janela, com a vista atual
     I                      modo intervalo: setas esquerda/direita mudam o raio mínimo
                            e baixo/cima o raio máximo exibido (I de novo volta ao normal)
     J                      mostra / esconde o painel de métricas da árvore
@@ -64,6 +65,7 @@ Teclas e mouse:
     ESC                    sai
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -1230,7 +1232,7 @@ AJUDA = [
         ("F", "faces de trás em vermelho"), ("N", "ordem dos transparentes"),
     ]),
     ("Outros", [
-        ("Y", "mini Ray Tracer"), ("S", "salvar imagem"), ("A", "eixos do mundo"),
+        ("Y", "Ray Tracer da árvore (vista atual)"), ("S", "salvar imagem"), ("A", "eixos do mundo"),
         ("Q", "tema escuro / claro"), ("H", "fechar esta ajuda"), ("ESC", "fechar a ajuda / sair"),
     ]),
 ]
@@ -1277,6 +1279,23 @@ def desenhar_ajuda():
 
 
 # -------------------------------------------------------------------- entrada
+def abrir_ray_tracer(estado):
+    """Abre o Ray Tracer da árvore em outro processo (sem travar o visualizador),
+    passando a vista atual: a imagem traçada mostra o mesmo enquadramento."""
+    campos = ["modo", "mapa", "vista", "dist", "ang_x", "ang_y", "ang_z",
+              "tx", "ty", "tz", "s", "exagero", "perspectiva"]
+    vista = {c: getattr(estado, c) for c in campos}
+    vista["luz"] = [float(x) for x in estado.luz]
+    nome_tema = next(n for n, t in TEMAS.items() if t is tema)
+    programa = Path(__file__).with_name("raytracer_arvore.py")
+    if not estado.arvore.eh_3d:
+        programa = Path(__file__).with_name("raytracer.py")   # cena de exemplo
+        subprocess.Popen([sys.executable, str(programa)])
+        return
+    subprocess.Popen([sys.executable, str(programa), str(estado.caminho),
+                      "--vista", json.dumps(vista, default=float), "--tema", nome_tema])
+
+
 def tratar_tecla_luz(estado, tecla):
     """No modo luz, setas e PageUp/PageDown movem a fonte e + / - mudam a intensidade."""
     passo = 0.2
@@ -1367,8 +1386,7 @@ def tratar_tecla(estado, tecla):
         estado.fluxo = not estado.fluxo
         estado.atualizar_cores()
     elif tecla == pygame.K_y:
-        # o ray tracer roda em outro processo, sem travar o visualizador
-        subprocess.Popen([sys.executable, str(Path(__file__).with_name("raytracer.py"))])
+        abrir_ray_tracer(estado)
     elif tecla == pygame.K_e:
         estado.modo = (estado.modo + 1) % len(MODOS)
         estado.reconstruir()
@@ -1462,6 +1480,7 @@ def main():
     painel_ui = painel.Painel(LARGURA, ALTURA, desenhar_texto)
 
     estado = Estado(arvore)
+    estado.caminho = caminho                        # usado pelo Ray Tracer (tecla Y)
     estado.modo = 1 if arvore.eh_3d else 0          # TP2: modelos 3D abrem em tubos
     estado.fbo_msaa, estado.amostras_msaa = criar_fbo_msaa(4)
     estado.reconstruir()
